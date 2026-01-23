@@ -19,8 +19,7 @@ dependencies = [
     "jmespath",
     "deprecated",
     "curl_cffi",
-    "cryptography" ,
-    "pyscrypt"
+    "cryptography"
 ]
 
 
