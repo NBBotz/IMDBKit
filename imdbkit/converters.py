@@ -56,9 +56,9 @@ def _certificates_to_dict(result):
         cert_id, country_code, country_name, rating_value, rating_reason, regions = item
         rating = f"{rating_value} " + ", ".join(regions)
         if country_code not in res:
-            res[country_code] = [country_name, rating]
+            res[country_code] = {"country": country_name, "rating": rating}
         else:
-            res[country_code][1] += " :: " + rating
+            res[country_code]["rating"] += " :: " + rating
     return res
 
 
