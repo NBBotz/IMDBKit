@@ -1,0 +1,33 @@
+{
+  "props": {
+    "pageProps": {
+      "aboveTheFold": {
+        "id": "nm0000126",
+        "nameText": { "text": "Kevin Costner" },
+        "primaryImage": { "url": "http://example.com/kevin.jpg" },
+        "bio": { "text": { "plainText": "Kevin Costner bio..." } },
+        "birthDate": { "date": "1955-01-18" },
+        "deathDate": null,
+        "primaryProfessions": []
+      },
+      "mainColumnData": {
+        "id": "nm0000126",
+        "height": { "displayableProperty": { "value": { "plainText": "1.85 m" } } },
+        "birthLocation": { "text": "Lynwood, California, USA" },
+        "deathLocation": null,
+        "deathReason": null,
+        "knownForFeatureV2": {
+          "credits": [
+            {
+              "title": { "titleText": { "text": "Balla coi lupi" }, "id": "tt0099419" },
+              "creditedRoles": { "edges": [ { "node": { "text": "Lieutenant Dunbar" } } ] }
+            }
+          ]
+        },
+        "professions": [],
+        "released": { "edges": [] },
+        "unreleased": { "edges": [] }
+      }
+    }
+  }
+}
