@@ -188,7 +188,7 @@ class WafHandler:
         res = self.session.post(
             f"https://{self.endpoint}/verify",
             json=payload).json()
-        return res["token"]
+        return res["token"], self.session.cookies
 
     def __call__(self):
         inputs = self.fetch_challenge_params()
