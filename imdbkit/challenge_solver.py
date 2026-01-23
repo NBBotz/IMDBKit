@@ -1,7 +1,6 @@
 import hashlib
 import binascii
 from typing import Union, Callable, Any
-import pyscrypt
 import itertools
 import logging
 
@@ -37,10 +36,10 @@ def solve_multi_prime(challenge_input, checksum, difficulty):
 
 def scrypt_func(input_str, salt_str, memory_cost):
     return binascii.hexlify(
-        pyscrypt.hash(
+        hashlib.scrypt(
             password=input_str.encode(),
             salt=salt_str.encode(),
-            N=memory_cost, r=8, p=1, dkLen=16
+            n=memory_cost, r=8, p=1, dklen=16
         )
     ).decode()
 
