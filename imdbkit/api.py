@@ -564,10 +564,10 @@ def make_graphql_request(headers, imdbId, payload, url) -> Any:
 def get_movie(imdb_id: str, locale: Optional[str] = None) -> Optional[MovieDetail]:
     return _default_kit.get_movie(imdb_id, locale)
 
-def search_title(
+def search_movie(
     title: str, locale: Optional[str] = None, title_type: Optional[TitleFilter] = None
 ) -> Optional[SearchResult]:
-    return _default_kit.search_title(title, locale, title_type)
+    return _default_kit.search_movie(title, locale, title_type)
 
 def get_name(person_id: str, locale: Optional[str] = None) -> Optional[PersonDetail]:
     return _default_kit.get_name(person_id, locale)
