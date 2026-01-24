@@ -51,7 +51,7 @@ kit = IMDBKit()
 ```python
 from imdbkit import TitleType
 
-results = kit.search_title("The Matrix", title_type=TitleType.Movies)
+results = kit.search_movie("The Matrix", title_type=TitleType.Movies)
 for title in results.titles:
     print(f"{title.title} ({title.year}) - {title.imdbId}")
 ```
