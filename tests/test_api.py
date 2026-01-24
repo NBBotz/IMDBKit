@@ -30,18 +30,18 @@ def test_get_movie(monkeypatch):
     assert movie.duration == 136
 
 
-def test_search_title(monkeypatch):
+def test_search_movie(monkeypatch):
     kit = IMDBKit()
     monkeypatch.setattr(kit.session, "get", mock_get_factory("sample_search.json"))
-    result = kit.search_title("matrix")
+    result = kit.search_movie("matrix")
     assert result.titles[0].title == "The Matrix"
     assert result.names
 
 
-def test_search_title_includes_rating(monkeypatch):
+def test_search_movie_includes_rating(monkeypatch):
     kit = IMDBKit()
     monkeypatch.setattr(kit.session, "get", mock_get_factory("sample_search.json"))
-    result = kit.search_title("matrix")
+    result = kit.search_movie("matrix")
     assert result.titles[0].rating == 8.7
     assert result.titles[1].rating == 7.2
     assert result.titles[2].rating == 7.4
