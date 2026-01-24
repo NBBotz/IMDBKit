@@ -93,7 +93,7 @@ class IMDBKit:
           else:
             token, cookies = WafHandler(tk, host, "www.imdb.com")()
           self.session.cookies.update(cookies)
-          self.session.cookies.update({"aws-waf-token" : token})
+          self.session.cookies.set("aws-waf-token", token, domain=".imdb.com")
           return {"aws-waf-token": token}
         except Exception:
           return {}
