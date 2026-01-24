@@ -26,10 +26,10 @@ def test_class_usage_get_movie(monkeypatch):
     assert movie.title == "The Matrix"
     assert movie.duration == 136
 
-def test_class_usage_search_title(monkeypatch):
+def test_class_usage_search_movie(monkeypatch):
     kit = IMDBKit()
     monkeypatch.setattr(kit.session, "get", mock_get_factory("sample_search.json"))
 
-    result = kit.search_title("matrix")
+    result = kit.search_movie("matrix")
     assert result.titles[0].title == "The Matrix"
     assert result.names
