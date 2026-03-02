@@ -49,9 +49,15 @@ TitleFilter = Union[TitleType, Tuple[TitleType, ...]]
 
 logger = logging.getLogger(__name__)
 
-# Rotated User Agents
+# Rotated User Agents - Added more user agents for better rotation
 USER_AGENTS_LIST = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.5; rv:128.0) Gecko/20100101 Firefox/128.0",
 ]
 
 class IMDBKit:
@@ -95,7 +101,8 @@ class IMDBKit:
           self.session.cookies.update(cookies)
           self.session.cookies.set("aws-waf-token", token, domain=".imdb.com")
           return {"aws-waf-token": token}
-        except Exception:
+        except Exception as e:
+          logger.warning("Failed to solve WAF challenge: %s", e)
           return {}
 
     def _safe_request(self, method: str, url: str, **kwargs) -> Any:
@@ -357,13 +364,17 @@ class IMDBKit:
         """Fetch movie details from IMDb using the provided IMDb ID as string,
         preserve the 'tt' prefix or not, it will be stripped in the function.
         """
-        imdb_id, lang = self._normalize_imdb_id(imdb_id, locale)
-        url = f"https://www.imdb.com/{lang}/title/tt{imdb_id}/reference"
-        logger.info("Fetching movie %s", imdb_id)
-        raw_json = self._request_json_url(url)
-        movie = parse_json_movie(raw_json)
-        logger.debug("Fetched url %s", url)
-        return movie
+        try:
+            imdb_id, lang = self._normalize_imdb_id(imdb_id, locale)
+            url = f"https://www.imdb.com/{lang}/title/tt{imdb_id}/reference"
+            logger.info("Fetching movie %s", imdb_id)
+            raw_json = self._request_json_url(url)
+            movie = parse_json_movie(raw_json)
+            logger.debug("Fetched url %s", url)
+            return movie
+        except Exception as e:
+            logger.warning("Failed to get movie %s: %s", imdb_id, e)
+            return None
 
     @lru_cache(maxsize=128)
     def search_movie(
@@ -371,13 +382,15 @@ class IMDBKit:
         title: str,
         locale: Optional[str] = None,
         title_type: Optional[TitleFilter] = None
-    ) -> Optional[SearchResult]:
+    ) -> SearchResult:
         """
         Search for a movie by title and return a list of titles and names.
 
         :param title: Title to search for.
         :param locale: Optional locale string (e.g., 'en', 'es').
         :param title_type: Optional filter(s) for media type. Must be a single TitleType enum member or a hashable tuple of TitleType members.
+        
+        :return: SearchResult object with titles and names lists. Returns empty SearchResult on failure instead of None.
         """
         effective_locale = locale if locale is not None else self.locale
         lang_str = _retrieve_url_lang(effective_locale)
@@ -402,66 +415,89 @@ class IMDBKit:
 
         logger.info("Searching for title '%s' [Type: %s]", title, type_log)
 
-        # search_title logic in original code returns None on failure instead of raising Exception
+        # FIX: Instead of returning None on failure, return empty SearchResult
         try:
             resp = self._safe_request("GET", url)
         except Exception as e:
             logger.warning("Search request failed: %s", e)
-            return None
+            # FIX: Return empty SearchResult instead of None
+            return SearchResult(titles=[], names=[])
 
-        tree = html.fromstring(resp.content or b"")
-        script = tree.xpath('//script[@id="__NEXT_DATA__"]/text()')
+        try:
+            tree = html.fromstring(resp.content or b"")
+            script = tree.xpath('//script[@id="__NEXT_DATA__"]/text()')
 
-        if not script or not isinstance(script, list) or len(script) == 0:
-            logger.error("No script found with id '__NEXT_DATA__'")
-            raise Exception("No script found with id '__NEXT_DATA__'")
+            if not script or not isinstance(script, list) or len(script) == 0:
+                logger.error("No script found with id '__NEXT_DATA__'")
+                # FIX: Return empty SearchResult instead of raising exception
+                return SearchResult(titles=[], names=[])
 
-        raw_json = json.loads(str(script[0]))
-
-        result = parse_json_search(raw_json)
-        logger.debug("Search for '%s' returned %s titles", title, len(result.titles))
-        return result
+            raw_json = json.loads(str(script[0]))
+            result = parse_json_search(raw_json)
+            logger.debug("Search for '%s' returned %s titles", title, len(result.titles))
+            return result
+        except Exception as e:
+            logger.error("Failed to parse search results for '%s': %s", title, e)
+            # FIX: Return empty SearchResult on parsing failure
+            return SearchResult(titles=[], names=[])
 
     @lru_cache(maxsize=128)
     def get_name(self, person_id: str, locale: Optional[str] = None) -> Optional[PersonDetail]:
         """Fetch person details from IMDb using the provided IMDb ID.
         Preserve the 'nm' prefix or not, it will be stripped in the function.
         """
-        person_id, lang = self._normalize_imdb_id(person_id, locale)
-        url = f"https://www.imdb.com/{lang}/name/nm{person_id}/"
-        t0 = time()
-        logger.info("Fetching person %s", person_id)
-        raw_json = self._request_json_url(url)
-        t1 = time()
-        logger.debug("Fetched person %s in %.2f seconds", person_id, t1 - t0)
-        t0 = time()
-        person = parse_json_person_detail(raw_json)
-        t1 = time()
-        logger.debug("Parsed person %s in %.2f seconds", person_id, t1 - t0)
-        return person
+        try:
+            person_id, lang = self._normalize_imdb_id(person_id, locale)
+            url = f"https://www.imdb.com/{lang}/name/nm{person_id}/"
+            t0 = time()
+            logger.info("Fetching person %s", person_id)
+            raw_json = self._request_json_url(url)
+            t1 = time()
+            logger.debug("Fetched person %s in %.2f seconds", person_id, t1 - t0)
+            t0 = time()
+            person = parse_json_person_detail(raw_json)
+            t1 = time()
+            logger.debug("Parsed person %s in %.2f seconds", person_id, t1 - t0)
+            return person
+        except Exception as e:
+            logger.warning("Failed to get person %s: %s", person_id, e)
+            return None
 
     @lru_cache(maxsize=128)
     def get_season_episodes(
         self, imdb_id: str, season=1, locale: Optional[str] = None
     ) -> SeasonEpisodesList:
         """Fetch episodes for a movie or series using the provided IMDb ID."""
-        imdb_id, lang = self._normalize_imdb_id(imdb_id, locale)
-        url = f"https://www.imdb.com/{lang}/title/tt{imdb_id}/episodes/?season={season}"
-        logger.info("Fetching episodes for movie %s", imdb_id)
-        raw_json = self._request_json_url(url)
-        episodes = parse_json_season_episodes(raw_json)
-        logger.debug("Fetched %d episodes for movie %s", len(episodes.episodes), imdb_id)
-        return episodes
+        try:
+            imdb_id, lang = self._normalize_imdb_id(imdb_id, locale)
+            url = f"https://www.imdb.com/{lang}/title/tt{imdb_id}/episodes/?season={season}"
+            logger.info("Fetching episodes for movie %s", imdb_id)
+            raw_json = self._request_json_url(url)
+            episodes = parse_json_season_episodes(raw_json)
+            logger.debug("Fetched %d episodes for movie %s", len(episodes.episodes), imdb_id)
+            return episodes
+        except Exception as e:
+            logger.warning("Failed to get episodes for %s: %s", imdb_id, e)
+            # Return empty episodes list on failure
+            return SeasonEpisodesList(
+                series_imdbId=f"tt{imdb_id}",
+                season_number=season,
+                episodes=[]
+            )
 
     @lru_cache(maxsize=128)
     def get_all_episodes(self, imdb_id: str, locale: Optional[str] = None):
-        series_id, lang = self._normalize_imdb_id(imdb_id, locale)
-        url = f"https://www.imdb.com/{lang}/search/title/?count=250&series=tt{series_id}&sort=release_date,asc"
-        logger.info("Fetching bulk episodes for series %s", imdb_id)
-        raw_json = self._request_json_url(url)
-        episodes = parse_json_bulked_episodes(raw_json)
-        logger.debug("Fetched %d episodes for series %s", len(episodes), imdb_id)
-        return episodes
+        try:
+            series_id, lang = self._normalize_imdb_id(imdb_id, locale)
+            url = f"https://www.imdb.com/{lang}/search/title/?count=250&series=tt{series_id}&sort=release_date,asc"
+            logger.info("Fetching bulk episodes for series %s", imdb_id)
+            raw_json = self._request_json_url(url)
+            episodes = parse_json_bulked_episodes(raw_json)
+            logger.debug("Fetched %d episodes for series %s", len(episodes), imdb_id)
+            return episodes
+        except Exception as e:
+            logger.warning("Failed to get all episodes for %s: %s", imdb_id, e)
+            return []
 
     @lru_cache(maxsize=128)
     def get_episodes(
@@ -476,14 +512,18 @@ class IMDBKit:
         return self.get_season_episodes(imdb_id, season, locale)
 
     def get_akas(self, imdb_id: str) -> Union[AkasData, list]:
-        imdb_id, _ = self._normalize_imdb_id(imdb_id)
-        raw_json = self._get_extended_title_info(imdb_id)
-        if not raw_json:
-            logger.warning("No AKAs found for title %s", imdb_id)
+        try:
+            imdb_id, _ = self._normalize_imdb_id(imdb_id)
+            raw_json = self._get_extended_title_info(imdb_id)
+            if not raw_json:
+                logger.warning("No AKAs found for title %s", imdb_id)
+                return []
+            akas = parse_json_akas(raw_json)
+            logger.debug("Fetched %d AKAs for title %s", len(akas), imdb_id)
+            return akas
+        except Exception as e:
+            logger.warning("Failed to get AKAs for %s: %s", imdb_id, e)
             return []
-        akas = parse_json_akas(raw_json)
-        logger.debug("Fetched %d AKAs for title %s", len(akas), imdb_id)
-        return akas
 
     def get_all_interests(self, imdb_id: str):
         """
@@ -497,53 +537,69 @@ class IMDBKit:
         more resource-intensive than standard API calls. Use this function only if you require interests
         beyond what is available in movie.genres, as it can impact performance.
         """
-        imdb_id, _ = self._normalize_imdb_id(imdb_id)
-        raw_json = self._get_extended_title_info(imdb_id)
-        if not raw_json:
-            logger.warning("No interests found for title %s", imdb_id)
+        try:
+            imdb_id, _ = self._normalize_imdb_id(imdb_id)
+            raw_json = self._get_extended_title_info(imdb_id)
+            if not raw_json:
+                logger.warning("No interests found for title %s", imdb_id)
+                return []
+            interests = []
+            interests_edges = raw_json.get("interests", {}).get("edges", [])
+            for edge in interests_edges:
+                node = edge.get("node", {})
+                primary_text = node.get("primaryText", {}).get("text", "")
+                if primary_text:
+                    interests.append(primary_text)
+            logger.debug("Fetched %d interests for title %s", len(interests), imdb_id)
+            return interests
+        except Exception as e:
+            logger.warning("Failed to get interests for %s: %s", imdb_id, e)
             return []
-        interests = []
-        interests_edges = raw_json.get("interests", {}).get("edges", [])
-        for edge in interests_edges:
-            node = edge.get("node", {})
-            primary_text = node.get("primaryText", {}).get("text", "")
-            if primary_text:
-                interests.append(primary_text)
-        logger.debug("Fetched %d interests for title %s", len(interests), imdb_id)
-        return interests
 
     def get_trivia(self, imdb_id: str) -> List[Dict]:
-        imdb_id, _ = self._normalize_imdb_id(imdb_id)
-        raw_json = self._get_extended_title_info(imdb_id)
-        if not raw_json:
-            logger.warning("No trivia found for title %s", imdb_id)
+        try:
+            imdb_id, _ = self._normalize_imdb_id(imdb_id)
+            raw_json = self._get_extended_title_info(imdb_id)
+            if not raw_json:
+                logger.warning("No trivia found for title %s", imdb_id)
+                return []
+            trivia_list = parse_json_trivia(raw_json)
+            logger.debug("Fetched %d trivia items for title %s", len(trivia_list), imdb_id)
+            return trivia_list
+        except Exception as e:
+            logger.warning("Failed to get trivia for %s: %s", imdb_id, e)
             return []
-        trivia_list = parse_json_trivia(raw_json)
-        logger.debug("Fetched %d trivia items for title %s", len(trivia_list), imdb_id)
-        return trivia_list
 
     def get_reviews(self, imdb_id: str) -> List[Dict]:
-        imdb_id, _ = self._normalize_imdb_id(imdb_id)
-        raw_json = self._get_extended_title_info(imdb_id)
-        if not raw_json:
-            logger.warning("No reviews found for title %s", imdb_id)
+        try:
+            imdb_id, _ = self._normalize_imdb_id(imdb_id)
+            raw_json = self._get_extended_title_info(imdb_id)
+            if not raw_json:
+                logger.warning("No reviews found for title %s", imdb_id)
+                return []
+            reviews_list = parse_json_reviews(raw_json)
+            logger.debug("Fetched %d reviews for title %s", len(reviews_list), imdb_id)
+            return reviews_list
+        except Exception as e:
+            logger.warning("Failed to get reviews for %s: %s", imdb_id, e)
             return []
-        reviews_list = parse_json_reviews(raw_json)
-        logger.debug("Fetched %d reviews for title %s", len(reviews_list), imdb_id)
-        return reviews_list
 
     def get_filmography(self, imdb_id) -> dict:
         """
         Fetch full filmography for a person using the provided IMDb ID.
         """
-        imdb_id, _ = self._normalize_imdb_id(imdb_id)
-        raw_json = self._get_extended_name_info(imdb_id)
-        if not raw_json:
-            logger.warning("No full_credit found for name %s", imdb_id)
+        try:
+            imdb_id, _ = self._normalize_imdb_id(imdb_id)
+            raw_json = self._get_extended_name_info(imdb_id)
+            if not raw_json:
+                logger.warning("No full_credit found for name %s", imdb_id)
+                return {}
+            full_credits_list = parse_json_filmography(raw_json)
+            logger.debug("Fetched full_credits for name %s", imdb_id)
+            return full_credits_list
+        except Exception as e:
+            logger.warning("Failed to get filmography for %s: %s", imdb_id, e)
             return {}
-        full_credits_list = parse_json_filmography(raw_json)
-        logger.debug("Fetched full_credits for name %s", imdb_id)
-        return full_credits_list
 
 # Create a default instance for backward compatibility and module-level functions
 _default_kit = IMDBKit()
@@ -566,7 +622,7 @@ def get_movie(imdb_id: str, locale: Optional[str] = None) -> Optional[MovieDetai
 
 def search_movie(
     title: str, locale: Optional[str] = None, title_type: Optional[TitleFilter] = None
-) -> Optional[SearchResult]:
+) -> SearchResult:
     return _default_kit.search_movie(title, locale, title_type)
 
 def get_name(person_id: str, locale: Optional[str] = None) -> Optional[PersonDetail]:
