@@ -54,7 +54,7 @@ def solve_scrypt(challenge_input, checksum, difficulty):
     return None
 
 
-# Known challenge types
+# Known challenge typess
 CHALLENGE_TYPES: dict[str, Union[Callable[[Any, Any, Any], str], str]] = {
     'h72f957df656e80ba55f5d8ce2e8c7ccb59687dba3bfb273d54b08a261b2f3002': solve_scrypt,
     'h7b0c470f0cfe3a80a9e26526ad185f484f6817d0832712a4a37a908786a6a67f': solve_pow_sha256,
@@ -72,6 +72,5 @@ def get_challenge_solver(challenge_type: str):
     if challenge_type in CHALLENGE_TYPES:
         return CHALLENGE_TYPES[challenge_type]
     
-    # FIX: Log unknown challenge type and default to SHA256 solver
     logger.warning("Unknown challenge type: %s. Defaulting to SHA256 solver.", challenge_type)
     return solve_pow_sha256
