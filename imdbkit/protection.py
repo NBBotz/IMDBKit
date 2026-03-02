@@ -1,7 +1,7 @@
 import random, json
 
 from curl_cffi import requests
-from .challenge_solver import CHALLENGE_TYPES
+from .challenge_solver import get_challenge_solver
 from .device_profile import create_fingerprint
 
 
@@ -41,7 +41,8 @@ class WafHandler:
             f"https://{self.endpoint}/inputs?client=browser").json()
 
     def construct_payload(self, inputs: dict):
-        verify = CHALLENGE_TYPES[inputs["challenge_type"]]
+        # FIX: Use get_challenge_solver instead of direct dictionary access
+        verify = get_challenge_solver(inputs["challenge_type"])
         checksum, fp = create_fingerprint(self.user_agent)
         return {
             "challenge": inputs["challenge"],
