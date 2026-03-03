@@ -6,12 +6,21 @@ from .device_profile import create_fingerprint
 
 
 class WafHandler:
+    """
+    AWS WAF challenge solver.
+
+    imdbinfo jaisa design:
+    - Caller apna session pass karta hai
+    - WafHandler usi session se /inputs aur /verify call karta hai
+    - Sirf token return karta hai — session cookies caller ke paas rehti hai
+    """
+
     def __init__(
         self,
         goku_props: str,
         endpoint: str,
         domain: str,
-        session,                          # caller's shared session — no new session created here
+        session,                   # caller ka session — imdbinfo jaisa
         user_agent: str = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -21,9 +30,9 @@ class WafHandler:
         self.session = session
         self.session.headers = {
             "connection": "keep-alive",
-            "sec-ch-ua-platform": "\"Windows\"",
+            "sec-ch-ua-platform": '"Windows"',
             "user-agent": user_agent,
-            "sec-ch-ua": "\"Chromium\";v=\"136\", \"Google Chrome\";v=\"136\", \"Not.A/Brand\";v=\"99\"",
+            "sec-ch-ua": '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
             "sec-ch-ua-mobile": "?0",
             "accept": "*/*",
             "sec-fetch-site": "cross-site",
@@ -37,16 +46,17 @@ class WafHandler:
         self.domain = domain
         self.endpoint = endpoint
 
-        # Pass existing token so AWS WAF can renew it instead of issuing a full new challenge
+        # imdbinfo jaisa — existing token session se lo
         existing = self.session.cookies.get("aws-waf-token")
         self.existing_token = existing if existing else None
 
     @staticmethod
     def parse_challenge(html: str):
+        """imdbinfo ka AwsWaf.extract() ka exact equivalent"""
         goku_props = json.loads(
             html.split("window.gokuProps = ")[1].split(";")[0]
         )
-        host = html.split("src=\"https://")[1].split("/challenge.js")[0]
+        host = html.split('src="https://')[1].split("/challenge.js")[0]
         return goku_props, host
 
     def fetch_challenge_params(self):
@@ -55,12 +65,21 @@ class WafHandler:
         ).json()
 
     def construct_payload(self, inputs: dict):
-        verify = CHALLENGE_TYPES[inputs["challenge_type"]]
+        challenge_type = inputs["challenge_type"]
+        solver = CHALLENGE_TYPES.get(challenge_type)
+
+        # mp_verify solve nahi hota — imdbinfo bhi isko skip karta hai
+        if solver is None or not callable(solver):
+            raise ValueError(
+                f"Unsolvable challenge type: '{challenge_type}'. "
+                "WAF caller ko fresh Chrome retry karni chahiye."
+            )
+
         checksum, fp = create_fingerprint(self.user_agent)
         return {
             "challenge": inputs["challenge"],
             "checksum": checksum,
-            "solution": verify(
+            "solution": solver(
                 inputs["challenge"]["input"], checksum, inputs["difficulty"]
             ),
             "signals": [{"name": "Zoey", "value": {"Present": fp}}],
@@ -97,9 +116,9 @@ class WafHandler:
     def submit_challenge(self, payload):
         self.session.headers = {
             "connection": "keep-alive",
-            "sec-ch-ua-platform": "\"Windows\"",
+            "sec-ch-ua-platform": '"Windows"',
             "user-agent": self.user_agent,
-            "sec-ch-ua": "\"Chromium\";v=\"136\", \"Google Chrome\";v=\"136\", \"Not.A/Brand\";v=\"99\"",
+            "sec-ch-ua": '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
             "content-type": "text/plain;charset=UTF-8",
             "sec-ch-ua-mobile": "?0",
             "accept": "*/*",
@@ -109,17 +128,10 @@ class WafHandler:
             "accept-encoding": "gzip, deflate, br, zstd",
             "accept-language": "en-US,en;q=0.9",
         }
-        import logging as _log
-        _logger = _log.getLogger(__name__)
-        response = self.session.post(
+        res = self.session.post(
             f"https://{self.endpoint}/verify", json=payload
-        )
-        _logger.debug("WAF /verify HTTP status: %s", response.status_code)
-        res = response.json()
-        _logger.debug("WAF /verify response keys: %s", list(res.keys()) if isinstance(res, dict) else type(res))
-        if "token" not in res:
-            raise ValueError(f"No token in WAF /verify response: {res}")
-        # Return only the token -- session cookies are already updated in-place
+        ).json()
+        # imdbinfo jaisa — sirf token return karo
         return res["token"]
 
     def __call__(self):
