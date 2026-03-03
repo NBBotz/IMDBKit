@@ -8,7 +8,7 @@ import json
 from lxml import html
 from enum import Enum
 
-from curl_cffi import Session as SyncSession
+from curl_cffi import Session as SyncSession  
 
 from .structs import (
     SearchResult,
@@ -48,6 +48,8 @@ logger = logging.getLogger(__name__)
 USER_AGENTS_LIST = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
 ]
+
+WAF_DETECTED = True
 
 
 class IMDBKit:
@@ -90,7 +92,7 @@ class IMDBKit:
                 tk, host, "www.imdb.com", session=self.session, user_agent=ua
             )()
             self.session.cookies.set("aws-waf-token", token, domain=".imdb.com")
-            logger.debug("WAF token obtained and stored on shared session.")
+            logger.debug("WAF token obtained: %s...", token[:20])
             return {"aws-waf-token": token}
         except Exception as e:
             logger.warning("WAF challenge solve failed: %s", e)
@@ -99,33 +101,40 @@ class IMDBKit:
             self._reset_browse_headers()
 
     def _safe_request(self, method: str, url: str, **kwargs) -> Any:
+        global WAF_DETECTED
         user_agent = random.choice(USER_AGENTS_LIST)
         self.session.headers["user-agent"] = user_agent
         logger.debug("Using User-Agent: %s", user_agent)
-
         if method.upper() == "GET":
             resp = self.session.get(url, **kwargs)
         else:
             resp = self.session.post(url, **kwargs)
 
-        waf_detected = (
+        waf_hit = (
             resp.status_code in [202, 403]
             or (resp.status_code == 200 and "window.gokuProps" in resp.text)
         )
 
         retried = False
-        if waf_detected:
+        if waf_hit:
+            WAF_DETECTED = True
             logger.warning(
                 "HTTP %s — WAF challenge detected. Solving from response body...",
                 resp.status_code,
             )
-            self._get_cookies(resp.text, user_agent)
-            logger.info("WAF solved. Retrying original request with shared session...")
+            cookies = self._get_cookies(resp.text, user_agent)
+            logger.info("WAF solved. Retrying with explicit cookie...")
+            retry_kwargs = dict(kwargs)
+            retry_kwargs["cookies"] = cookies
             if method.upper() == "GET":
-                resp = self.session.get(url, **kwargs)
+                resp = self.session.get(url, **retry_kwargs)
             else:
-                resp = self.session.post(url, **kwargs)
+                resp = self.session.post(url, **retry_kwargs)
             retried = True
+        else:
+            if WAF_DETECTED:
+                logger.debug("Clean response received — disabling WAF overhead.")
+            WAF_DETECTED = False
 
         if resp.status_code != 200:
             logger.error("Request failed: %s %s", url, resp.status_code)
@@ -260,7 +269,7 @@ class IMDBKit:
         data = self._make_graphql_request(headers, nm_id, {"query": query}, url)
         return data.get("data", {}).get("name", {})
 
-    
+
     @lru_cache(maxsize=128)
     def get_movie(self, imdb_id: str, locale: Optional[str] = None) -> Optional[MovieDetail]:
         imdb_id, lang = self._normalize_imdb_id(imdb_id, locale)
@@ -416,4 +425,4 @@ def get_reviews(imdb_id: str) -> List[Dict]:
     return _default_kit.get_reviews(imdb_id)
 
 def get_filmography(imdb_id: str) -> dict:
-    return _default_kit.get_filmography(imdb_id)
+    return _default_kit.get_filmography(imdb_id
