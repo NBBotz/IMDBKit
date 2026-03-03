@@ -49,20 +49,16 @@ TitleFilter = Union[TitleType, Tuple[TitleType, ...]]
 
 logger = logging.getLogger(__name__)
 
-# Rotated User Agents
 USER_AGENTS_LIST = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
 ]
 
-# imdbinfo jaisa WAF_ON flag — True matlab WAF active hai
-# False matlab WAF nahi — fast path use hoga
 WAF_DETECTED = True
 
 
 class IMDBKit:
     def __init__(self, locale: Optional[str] = None):
         self.locale = locale
-        # imdbinfo jaisa — cffi_requests.Session use karta hai, SyncSession nahi
         self.session = cffi_requests.Session(impersonate="chrome")
         self.session.headers = {
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -90,20 +86,8 @@ class IMDBKit:
         return imdb_id, lang
 
     def _get_waf_token(self, html_text: str) -> dict:
-        """
-        imdbinfo ke request_json_url ka exact logic:
-
-            session = cffi_requests.Session(impersonate="chrome")
-            tk, host = AwsWaf.extract(resp.text)
-            token = AwsWaf(tk, host, "www.imdb.com", session)()
-            resp = cffi_requests.get(url, cookies={'aws-waf-token': token}, impersonate="chrome")
-
-        Fresh session banao, solve karo, sirf token return karo.
-        Retry caller pe hai — wahi cffi_requests.get directly call karta hai.
-        """
         try:
             tk, host = WafHandler.parse_challenge(html_text)
-            # imdbinfo jaisa — fresh session for solving
             session = cffi_requests.Session(impersonate="chrome")
             token = WafHandler(tk, host, "www.imdb.com", session)()
             logger.debug("WAF token obtained: %s...", str(token)[:20])
@@ -113,44 +97,25 @@ class IMDBKit:
             return {}
 
     def _request_json_url(self, url: str) -> Any:
-        """
-        imdbinfo ke request_json_url ka exact logic — ek-ek line match karta hai:
-
-        imdbinfo:
-            resp = request_handler(url)          → pehle normal request
-            if resp.status_code == 202:           → 202 mila?
-                session = cffi_requests.Session(impersonate="chrome")
-                tk, host = AwsWaf.extract(resp.text)
-                token = AwsWaf(tk, host, "www.imdb.com", session)()
-                WAF_ON = True
-                resp = cffi_requests.get(url, cookies={'aws-waf-token': token}, impersonate="chrome")
-            except:
-                resp = cffi_requests.get(url, cookies={}, impersonate="chrome")
-        """
         global WAF_DETECTED
-
-        # Step 1: pehle normal request — imdbinfo ka request_handler jaisa
         user_agent = random.choice(USER_AGENTS_LIST)
         self.session.headers["user-agent"] = user_agent
         logger.debug("Using User-Agent: %s", user_agent)
 
         if WAF_DETECTED:
-            logger.debug("WAF_DETECTED=True — Chrome impersonation use ho raha hai")
+            logger.debug("WAF_DETECTED=True")
             resp = cffi_requests.get(url, cookies={}, impersonate="chrome")
         else:
             resp = self.session.get(url)
 
-        # Step 2: 202 mila? — imdbinfo ka exact check
         if resp.status_code == 202:
             logger.warning("HTTP 202 received (WAF enforcement detected), solving WAF challenge...")
             try:
-                # imdbinfo ka exact line-by-line logic:
                 session = cffi_requests.Session(impersonate="chrome")
                 tk, host = WafHandler.parse_challenge(resp.text)
                 token = WafHandler(tk, host, "www.imdb.com", session)()
                 WAF_DETECTED = True
                 logger.debug("WAF challenge solved, retrying with token")
-                # imdbinfo jaisa — bare cffi_requests.get, session nahi
                 resp = cffi_requests.get(url, cookies={"aws-waf-token": token}, impersonate="chrome")
             except Exception as e:
                 logger.warning(
@@ -159,17 +124,15 @@ class IMDBKit:
                 )
                 resp = cffi_requests.get(url, cookies={}, impersonate="chrome")
 
-        # Step 3: status check
         if resp.status_code != 200:
             logger.error("Error fetching %s: %s", url, resp.status_code)
             error_msg = f"Error fetching {url}: HTTP {resp.status_code}"
             if resp.text:
                 error_msg += f" - {resp.text[:200]}"
             if resp.status_code == 202:
-                error_msg += " ****** AWS WAF enforcement in place. Try again later. ******"
+                error_msg += " AWS WAF Enforcement In Place. Try Again Later. ******"
             raise Exception(error_msg)
 
-        # Step 4: parse __NEXT_DATA__
         tree = html.fromstring(resp.content or b"")
         script = tree.xpath('//script[@id="__NEXT_DATA__"]/text()')
         if not script or type(script) is not list:
@@ -178,7 +141,6 @@ class IMDBKit:
         return json.loads(str(script[0]))
 
     def _make_graphql_request(self, headers, imdbId, payload, url) -> Any:
-        # GraphQL pe WAF nahi hota — direct session use karo
         resp = self.session.post(url, headers=headers, json=payload)
         if resp.status_code != 200:
             logger.error("GraphQL request failed: %s", resp.status_code)
@@ -566,7 +528,6 @@ class IMDBKit:
         return full_credits_list
 
 
-# Create a default instance for backward compatibility and module-level functions
 _default_kit = IMDBKit()
 sync_session = _default_kit.session
 
