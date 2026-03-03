@@ -8,8 +8,6 @@ import json
 from lxml import html
 from enum import Enum
 
-from curl_cffi import Session as SyncSession  # single import — direct, explicit, no shim
-
 from .structs import (
     SearchResult,
     MovieDetail,
@@ -30,45 +28,42 @@ from .data_parsing import (
 )
 from .i18n import _retrieve_url_lang
 from .protection import WafHandler
+from curl_cffi import requests as cffi_requests  # imdbinfo jaisa — same import
 
 
 class TitleType(Enum):
-    Movies   = "ft"
-    Series   = "tv"
+    """
+    Defines the valid 'ttype' filters for title searches on IMDb.
+    The values correspond to the URL parameter used in search queries.
+    """
+
+    Movies  = "ft"
+    Series  = "tv"
     Episodes = "ep"
-    Shorts   = "sh"
-    TvMovie  = "tvm"
-    Video    = "v"
+    Shorts  = "sh"
+    TvMovie = "tvm"
+    Video   = "v"
 
 
 TitleFilter = Union[TitleType, Tuple[TitleType, ...]]
 
 logger = logging.getLogger(__name__)
 
+# Rotated User Agents
 USER_AGENTS_LIST = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
 ]
 
-# Global WAF state flag.
-# True  -> Chrome impersonation + WAF token on every request (safe mode)
-# False -> plain request, no overhead (fast mode, used after a clean run)
-# Automatically flips back to True if a 202/403 is encountered again.
+# imdbinfo jaisa WAF_ON flag — True matlab WAF active hai
+# False matlab WAF nahi — fast path use hoga
 WAF_DETECTED = True
 
 
 class IMDBKit:
     def __init__(self, locale: Optional[str] = None):
         self.locale = locale
-        self.session = SyncSession(impersonate="chrome")
-        self._reset_browse_headers()
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _reset_browse_headers(self):
-        """Restore standard browser navigation headers on the shared session.
-        Called after WafHandler overwrites headers with its own CORS-style ones."""
+        # imdbinfo jaisa — cffi_requests.Session use karta hai, SyncSession nahi
+        self.session = cffi_requests.Session(impersonate="chrome")
         self.session.headers = {
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "accept-language": "en-US,en;q=0.5",
@@ -94,340 +89,493 @@ class IMDBKit:
         imdb_id = f"{num:07d}"
         return imdb_id, lang
 
-    def _solve_waf(self, html_text: str, user_agent: str) -> dict:
+    def _get_waf_token(self, html_text: str) -> dict:
         """
-        Solve the AWS WAF challenge using a FRESH dedicated session.
-        Isolated from self.session so no conflicting headers/cookies interfere.
-        Mirrors imdbinfo exactly:
+        imdbinfo ke request_json_url ka exact logic:
+
             session = cffi_requests.Session(impersonate="chrome")
+            tk, host = AwsWaf.extract(resp.text)
             token = AwsWaf(tk, host, "www.imdb.com", session)()
+            resp = cffi_requests.get(url, cookies={'aws-waf-token': token}, impersonate="chrome")
+
+        Fresh session banao, solve karo, sirf token return karo.
+        Retry caller pe hai — wahi cffi_requests.get directly call karta hai.
         """
         try:
             tk, host = WafHandler.parse_challenge(html_text)
-            solve_session = SyncSession(impersonate="chrome")
-            token = WafHandler(
-                tk, host, "www.imdb.com", session=solve_session, user_agent=user_agent
-            )()
-            # Merge ALL cookies from solve session (not just the token)
-            # AWS WAF may set additional session-binding cookies during /inputs and /verify
-            all_cookies = dict(solve_session.cookies)
-            all_cookies["aws-waf-token"] = token
-            # Also store on main session for future requests
-            for name, value in all_cookies.items():
-                self.session.cookies.set(name, value, domain=".imdb.com")
-            logger.debug("WAF token obtained: %s... (total cookies: %d)", token[:20], len(all_cookies))
-            return all_cookies
+            # imdbinfo jaisa — fresh session for solving
+            session = cffi_requests.Session(impersonate="chrome")
+            token = WafHandler(tk, host, "www.imdb.com", session)()
+            logger.debug("WAF token obtained: %s...", str(token)[:20])
+            return {"aws-waf-token": token}
         except Exception as e:
-            logger.warning("WAF challenge solve failed: %s", e)
-            import traceback
-            logger.debug("WAF solve traceback: %s", traceback.format_exc())
+            logger.warning("WAF solve failed: %s", e)
             return {}
 
-    def _safe_request(self, method: str, url: str, **kwargs) -> Any:
+    def _request_json_url(self, url: str) -> Any:
+        """
+        imdbinfo ke request_json_url ka exact logic — ek-ek line match karta hai:
+
+        imdbinfo:
+            resp = request_handler(url)          → pehle normal request
+            if resp.status_code == 202:           → 202 mila?
+                session = cffi_requests.Session(impersonate="chrome")
+                tk, host = AwsWaf.extract(resp.text)
+                token = AwsWaf(tk, host, "www.imdb.com", session)()
+                WAF_ON = True
+                resp = cffi_requests.get(url, cookies={'aws-waf-token': token}, impersonate="chrome")
+            except:
+                resp = cffi_requests.get(url, cookies={}, impersonate="chrome")
+        """
         global WAF_DETECTED
-        from curl_cffi import requests as cffi_requests
+
+        # Step 1: pehle normal request — imdbinfo ka request_handler jaisa
         user_agent = random.choice(USER_AGENTS_LIST)
         self.session.headers["user-agent"] = user_agent
         logger.debug("Using User-Agent: %s", user_agent)
 
-        if method.upper() == "GET":
-            resp = self.session.get(url, **kwargs)
+        if WAF_DETECTED:
+            logger.debug("WAF_DETECTED=True — Chrome impersonation use ho raha hai")
+            resp = cffi_requests.get(url, cookies={}, impersonate="chrome")
         else:
-            resp = self.session.post(url, **kwargs)
+            resp = self.session.get(url)
 
-        waf_hit = (
-            resp.status_code in [202, 403]
-            or (resp.status_code == 200 and "window.gokuProps" in resp.text)
-        )
-
-        retried = False
-        if waf_hit:
-            WAF_DETECTED = True
-            logger.warning(
-                "HTTP %s -- WAF challenge detected. Solving from response body...",
-                resp.status_code,
-            )
-            cookies = self._solve_waf(resp.text, user_agent)
-            logger.info("WAF solved. Retrying as standalone request with explicit cookie...")
-            # Retry as a BARE standalone cffi request -- NOT self.session.get()
-            # Mirrors imdbinfo:
-            #   resp = cffi_requests.get(url, cookies={'aws-waf-token': token}, impersonate="chrome")
+        # Step 2: 202 mila? — imdbinfo ka exact check
+        if resp.status_code == 202:
+            logger.warning("HTTP 202 received (WAF enforcement detected), solving WAF challenge...")
             try:
-                if method.upper() == "GET":
-                    resp = cffi_requests.get(url, cookies=cookies, impersonate="chrome")
-                else:
-                    post_kwargs = {k: v for k, v in kwargs.items() if k != "cookies"}
-                    resp = cffi_requests.post(url, cookies=cookies, impersonate="chrome", **post_kwargs)
+                # imdbinfo ka exact line-by-line logic:
+                session = cffi_requests.Session(impersonate="chrome")
+                tk, host = WafHandler.parse_challenge(resp.text)
+                token = WafHandler(tk, host, "www.imdb.com", session)()
+                WAF_DETECTED = True
+                logger.debug("WAF challenge solved, retrying with token")
+                # imdbinfo jaisa — bare cffi_requests.get, session nahi
+                resp = cffi_requests.get(url, cookies={"aws-waf-token": token}, impersonate="chrome")
             except Exception as e:
-                logger.warning("Standalone retry failed: %s -- falling back to session", e)
-                retry_kwargs = dict(kwargs)
-                retry_kwargs["cookies"] = cookies
-                if method.upper() == "GET":
-                    resp = self.session.get(url, **retry_kwargs)
-                else:
-                    resp = self.session.post(url, **retry_kwargs)
-            retried = True
-        else:
-            if WAF_DETECTED:
-                logger.debug("Clean response -- disabling WAF overhead.")
-            WAF_DETECTED = False
+                logger.warning(
+                    "Failed to solve WAF challenge from 202 response: %s, "
+                    "falling back to Chrome impersonation without token (may not succeed)...", e
+                )
+                resp = cffi_requests.get(url, cookies={}, impersonate="chrome")
 
+        # Step 3: status check
         if resp.status_code != 200:
-            logger.error("Request failed: %s %s", url, resp.status_code)
-            msg = f"Request failed for {url}: HTTP {resp.status_code} [{user_agent}]"
-            if retried:
-                msg += " (after WAF retry)"
+            logger.error("Error fetching %s: %s", url, resp.status_code)
+            error_msg = f"Error fetching {url}: HTTP {resp.status_code}"
             if resp.text:
-                msg += f" -- {resp.text[:200]}"
-            raise Exception(msg)
+                error_msg += f" - {resp.text[:200]}"
+            if resp.status_code == 202:
+                error_msg += " ****** AWS WAF enforcement in place. Try again later. ******"
+            raise Exception(error_msg)
 
-        return resp
-
-    def _request_json_url(self, url: str) -> Any:
-        resp = self._safe_request("GET", url)
+        # Step 4: parse __NEXT_DATA__
         tree = html.fromstring(resp.content or b"")
         script = tree.xpath('//script[@id="__NEXT_DATA__"]/text()')
-        if not script or not isinstance(script, list):
+        if not script or type(script) is not list:
+            logger.error("No script found with id '__NEXT_DATA__'")
             raise Exception("No script found with id '__NEXT_DATA__'")
         return json.loads(str(script[0]))
 
     def _make_graphql_request(self, headers, imdbId, payload, url) -> Any:
-        resp = self._safe_request("POST", url, headers=headers, json=payload)
+        # GraphQL pe WAF nahi hota — direct session use karo
+        resp = self.session.post(url, headers=headers, json=payload)
+        if resp.status_code != 200:
+            logger.error("GraphQL request failed: %s", resp.status_code)
+            error_msg = f"GraphQL request failed for {imdbId}: HTTP {resp.status_code}"
+            if resp.text:
+                error_msg += f" - {resp.text[:200]}"
+            raise Exception(error_msg)
         data = resp.json()
         if "errors" in data:
+            logger.error("GraphQL error: %s", data["errors"])
             raise Exception(f"GraphQL error for {imdbId}: {data['errors']}")
         return data
 
-    # ------------------------------------------------------------------
-    # Extended info (GraphQL)
-    # ------------------------------------------------------------------
-
     @lru_cache(maxsize=128)
-    def _get_extended_title_info(self, imdb_id: str) -> dict:
+    def _get_extended_title_info(self, imdb_id) -> dict:
+        """
+        Fetch extended info (like AKAs) using IMDb's GraphQL API.
+        """
         imdbId = "tt" + imdb_id
         url = "https://api.graphql.imdb.com/"
-        headers = {"Content-Type": "application/json"}
-        query = """
+        headers = {
+            "Content-Type": "application/json",
+        }
+        query = (
+            """
             query {
               title(id: "%s") {
                 id
-                titleText { text }
-                originalTitle: originalTitleText { text }
-                interests(first: 20) {
-                  edges { node { primaryText { text } } }
+                titleText {
+                  text
                 }
+                originalTitle: originalTitleText {
+                  text
+                }
+                  interests(first:20){
+                    edges{node{primaryText{text}}}
+               }
                 akas(first: 200) {
                   edges {
                     node {
-                      country { name: text  code: id }
-                      language { name: text  code: id }
+                      country { name: text code: id }
+                      language { name: text code: id }
                       title: text
                     }
                   }
                 }
-                trivia(first: 50) {
-                  edges {
-                    node {
-                      id
-                      displayableArticle { body { plaidHtml } }
-                      interestScore { usersVoted  usersInterested }
+                 trivia(first: 50) {
+              edges {
+                node {
+                  id
+                  displayableArticle {
+                    body {
+                      plaidHtml
                     }
                   }
-                }
-                reviews(first: 50) {
-                  edges {
-                    node {
-                      id  spoiler
-                      author { nickName }
-                      summary { originalText }
-                      text { originalText { plaidHtml } }
-                      authorRating  submissionDate
-                      helpfulness { upVotes  downVotes }
-                      __typename
-                    }
-                  }
-                }
-                parentsGuide {
-                  categories {
-                    category { id  text }
-                    guideItems(first: 10) {
-                      edges { node { isSpoiler  text { plaidHtml } } }
-                    }
-                    severity { id  votedFor }
-                    severityBreakdown { votedFor  voteType }
+                  interestScore {
+                    usersVoted
+                    usersInterested
                   }
                 }
               }
             }
-        """ % imdbId
-        data = self._make_graphql_request(headers, imdbId, {"query": query}, url)
-        return data.get("data", {}).get("title", {})
+            reviews(first: 50) {
+              edges {
+                node {
+                  id
+                  spoiler
+                  author {
+                    nickName
+                  }
+                  summary {
+                    originalText
+                  }
+                  text {
+                    originalText {
+                      plaidHtml
+                    }
+                  }
+                  authorRating
+                  submissionDate
+                  helpfulness {
+                    upVotes
+                    downVotes
+                  }
+                  __typename
+                }
+              }
+            }
+              }
+            }
+            """
+            % imdbId
+        )
+        payload = {"query": query}
+        logger.info("Fetching title %s from GraphQL API", imdb_id)
+        data = self._make_graphql_request(headers, imdbId, payload, url)
+        raw_json = data.get("data", {}).get("title", {})
+        return raw_json
 
-    def _get_extended_name_info(self, person_id: str) -> dict:
-        nm_id = "nm" + person_id
-        query = """
-            query {
-              name(id: "%s") {
-                nameText { text }
-                credits(first: 250 filter: {
-                  categories: [
-                    "actor" "actress" "director" "writer" "producer"
-                    "composer" "cinematographer" "editor" "casting_director"
-                    "casting_department" "production_designer" "art_director"
-                    "set_decorator" "costume_designer" "make_up_department"
-                    "sound_department" "visual_effects" "stunt_coordinator"
-                    "stunts" "executive" "animation_department"
-                    "music_department" "transportation_department"
-                    "editorial_department" "assistant_director"
-                    "special_effects" "production_manager" "location_management"
-                    "camera_department" "art_department" "costume_department"
-                    "script_department" "publicist" "talent_agent" "soundtrack"
-                    "archive_sound"
-                  ]
-                }) {
-                  edges {
-                    node {
-                      category { id }
-                      title {
-                        id
-                        ratingsSummary { aggregateRating }
-                        primaryImage { url }
-                        originalTitleText { text }
-                        titleText { text }
-                        titleType { id }
-                        releaseYear { year }
+    def _get_extended_name_info(self, person_id) -> dict:
+        """
+        Fetch extended person info using IMDb's GraphQL API.
+        """
+        person_id = "nm" + person_id
+
+        query = (
+            """
+                query {
+                  name(id: "%s") {
+                    nameText {
+                      text
+                    }
+
+                    credits(first: 250
+                    filter: {
+                categories: [
+                  "production_designer"
+                  "casting_department"
+                  "director"
+                  "composer"
+                  "casting_director"
+                  "executive"
+                  "art_director"
+                  "actress"
+                  "costume_designer"
+                  "writer"
+                  "camera_department"
+                  "art_department"
+                  "publicist"
+                  "cinematographer"
+                  "location_management"
+                  "soundtrack"
+                  "sound_department"
+                  "talent_agent"
+                  "set_decorator"
+                  "animation_department"
+                  "make_up_department"
+                  "costume_department"
+                  "script_department"
+                  "producer"
+                  "stunts"
+                  "editor"
+                  "stunt_coordinator"
+                  "special_effects"
+                  "assistant_director"
+                  "editorial_department"
+                  "music_department"
+                  "transportation_department"
+                  "actor"
+                  "visual_effects"
+                  "production_manager"
+                  "production_designer"
+                  "casting_department"
+                  "director"
+                  "composer"
+                  "archive_sound"
+                  "casting_director"
+                  "art_director"
+                ]
+              }
+                    )
+
+                    {
+                      edges {
+                        node {
+                          category {
+                            id
+                          }
+
+                          title {
+                            id
+                            ratingsSummary{aggregateRating}
+                            primaryImage {
+                              url
+                            }
+                            #certificate {rating}
+                            originalTitleText {
+                              text
+                            }
+                            titleText {
+                              text
+                            }
+                            titleType {
+                              #text
+                              id
+                            }
+                            releaseYear {
+                              year
+                            }
+                          }
+                        }
+                      }
+
+                      pageInfo {
+                        endCursor
+                        hasNextPage
                       }
                     }
                   }
-                  pageInfo { endCursor  hasNextPage }
                 }
-              }
-            }
-        """ % nm_id
-        url = "https://api.graphql.imdb.com/"
-        headers = {"Content-Type": "application/json"}
-        data = self._make_graphql_request(headers, nm_id, {"query": query}, url)
-        return data.get("data", {}).get("name", {})
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+            """
+            % person_id
+        )
+        url = "https://api.graphql.imdb.com/"
+        headers = {
+            "Content-Type": "application/json",
+        }
+        payload = {"query": query}
+        logger.info("Fetching person %s from GraphQL API", person_id)
+        data = self._make_graphql_request(headers, person_id, payload, url)
+        raw_json = data.get("data", {}).get("name", {})
+        return raw_json
 
     @lru_cache(maxsize=128)
     def get_movie(self, imdb_id: str, locale: Optional[str] = None) -> Optional[MovieDetail]:
+        """Fetch movie details from IMDb using the provided IMDb ID as string,
+        preserve the 'tt' prefix or not, it will be stripped in the function.
+        """
         imdb_id, lang = self._normalize_imdb_id(imdb_id, locale)
         url = f"https://www.imdb.com/{lang}/title/tt{imdb_id}/reference"
         logger.info("Fetching movie %s", imdb_id)
-        return parse_json_movie(self._request_json_url(url))
+        raw_json = self._request_json_url(url)
+        movie = parse_json_movie(raw_json)
+        logger.debug("Fetched url %s", url)
+        return movie
 
     @lru_cache(maxsize=128)
     def search_movie(
         self,
         title: str,
         locale: Optional[str] = None,
-        title_type: Optional[TitleFilter] = None,
+        title_type: Optional[TitleFilter] = None
     ) -> Optional[SearchResult]:
+        """
+        Search for a movie by title and return a list of titles and names.
+
+        :param title: Title to search for.
+        :param locale: Optional locale string (e.g., 'en', 'es').
+        :param title_type: Optional filter(s) for media type. Must be a single TitleType enum member or a hashable tuple of TitleType members.
+        """
         effective_locale = locale if locale is not None else self.locale
         lang_str = _retrieve_url_lang(effective_locale)
         lang = f"{lang_str}/" if lang_str else ""
         url = f"https://www.imdb.com/{lang}find?q={title}&s=tt"
 
-        if title_type:
-            types_list = title_type if isinstance(title_type, tuple) else [title_type]
-            url += "&ttype=" + ",".join(tt.value for tt in types_list)
+        if not title_type:
+            type_log = "All"
+        else:
+            if isinstance(title_type, tuple):
+                types_list = title_type
+            else:
+                types_list = [title_type]
+
+            ttype_values = [tt.value for tt in types_list]
+            ttype_names = [tt.name for tt in types_list]
+
+            ttype_value = ",".join(ttype_values)
+            type_log = ", ".join(ttype_names)
+
+            url += f"&ttype={ttype_value}"
+
+        logger.info("Searching for title '%s' [Type: %s]", title, type_log)
 
         try:
-            resp = self._safe_request("GET", url)
+            raw_json = self._request_json_url(url)
         except Exception as e:
             logger.warning("Search request failed: %s", e)
             return None
 
-        tree = html.fromstring(resp.content or b"")
-        script = tree.xpath('//script[@id="__NEXT_DATA__"]/text()')
-        if not script or not isinstance(script, list):
-            raise Exception("No script found with id '__NEXT_DATA__'")
-        return parse_json_search(json.loads(str(script[0])))
+        result = parse_json_search(raw_json)
+        logger.debug("Search for '%s' returned %s titles", title, len(result.titles))
+        return result
 
     @lru_cache(maxsize=128)
     def get_name(self, person_id: str, locale: Optional[str] = None) -> Optional[PersonDetail]:
+        """Fetch person details from IMDb using the provided IMDb ID.
+        Preserve the 'nm' prefix or not, it will be stripped in the function.
+        """
         person_id, lang = self._normalize_imdb_id(person_id, locale)
         url = f"https://www.imdb.com/{lang}/name/nm{person_id}/"
+        t0 = time()
         logger.info("Fetching person %s", person_id)
-        return parse_json_person_detail(self._request_json_url(url))
+        raw_json = self._request_json_url(url)
+        t1 = time()
+        logger.debug("Fetched person %s in %.2f seconds", person_id, t1 - t0)
+        t0 = time()
+        person = parse_json_person_detail(raw_json)
+        t1 = time()
+        logger.debug("Parsed person %s in %.2f seconds", person_id, t1 - t0)
+        return person
 
     @lru_cache(maxsize=128)
     def get_season_episodes(
-        self, imdb_id: str, season: int = 1, locale: Optional[str] = None
+        self, imdb_id: str, season=1, locale: Optional[str] = None
     ) -> SeasonEpisodesList:
+        """Fetch episodes for a movie or series using the provided IMDb ID."""
         imdb_id, lang = self._normalize_imdb_id(imdb_id, locale)
         url = f"https://www.imdb.com/{lang}/title/tt{imdb_id}/episodes/?season={season}"
-        logger.info("Fetching episodes for %s season %s", imdb_id, season)
-        return parse_json_season_episodes(self._request_json_url(url))
+        logger.info("Fetching episodes for movie %s", imdb_id)
+        raw_json = self._request_json_url(url)
+        episodes = parse_json_season_episodes(raw_json)
+        logger.debug("Fetched %d episodes for movie %s", len(episodes.episodes), imdb_id)
+        return episodes
 
     @lru_cache(maxsize=128)
     def get_all_episodes(self, imdb_id: str, locale: Optional[str] = None):
         series_id, lang = self._normalize_imdb_id(imdb_id, locale)
         url = f"https://www.imdb.com/{lang}/search/title/?count=250&series=tt{series_id}&sort=release_date,asc"
-        logger.info("Fetching all episodes for series %s", imdb_id)
-        return parse_json_bulked_episodes(self._request_json_url(url))
+        logger.info("Fetching bulk episodes for series %s", imdb_id)
+        raw_json = self._request_json_url(url)
+        episodes = parse_json_bulked_episodes(raw_json)
+        logger.debug("Fetched %d episodes for series %s", len(episodes), imdb_id)
+        return episodes
 
     @lru_cache(maxsize=128)
     def get_episodes(
-        self, imdb_id: str, season: int = 1, locale: Optional[str] = None
+        self, imdb_id: str, season=1, locale: Optional[str] = None
     ) -> SeasonEpisodesList:
-        logger.warning("get_episodes is deprecated, use get_season_episodes or get_all_episodes.")
+        """wrap until deprecation : use get_season_episodes instead for seasons
+        or get_all_episodes for all episodes
+        """
+        logger.warning(
+            "get_episodes is deprecating, use get_season_episodes or get_all_episodes instead."
+        )
         return self.get_season_episodes(imdb_id, season, locale)
 
     def get_akas(self, imdb_id: str) -> Union[AkasData, list]:
         imdb_id, _ = self._normalize_imdb_id(imdb_id)
-        raw = self._get_extended_title_info(imdb_id)
-        return parse_json_akas(raw) if raw else []
+        raw_json = self._get_extended_title_info(imdb_id)
+        if not raw_json:
+            logger.warning("No AKAs found for title %s", imdb_id)
+            return []
+        akas = parse_json_akas(raw_json)
+        logger.debug("Fetched %d AKAs for title %s", len(akas), imdb_id)
+        return akas
 
     def get_all_interests(self, imdb_id: str):
         imdb_id, _ = self._normalize_imdb_id(imdb_id)
-        raw = self._get_extended_title_info(imdb_id)
-        if not raw:
+        raw_json = self._get_extended_title_info(imdb_id)
+        if not raw_json:
+            logger.warning("No interests found for title %s", imdb_id)
             return []
-        return [
-            edge["node"]["primaryText"]["text"]
-            for edge in raw.get("interests", {}).get("edges", [])
-            if edge["node"].get("primaryText", {}).get("text")
-        ]
+        interests = []
+        interests_edges = raw_json.get("interests", {}).get("edges", [])
+        for edge in interests_edges:
+            node = edge.get("node", {})
+            primary_text = node.get("primaryText", {}).get("text", "")
+            if primary_text:
+                interests.append(primary_text)
+        logger.debug("Fetched %d interests for title %s", len(interests), imdb_id)
+        return interests
 
     def get_trivia(self, imdb_id: str) -> List[Dict]:
         imdb_id, _ = self._normalize_imdb_id(imdb_id)
-        raw = self._get_extended_title_info(imdb_id)
-        return parse_json_trivia(raw) if raw else []
+        raw_json = self._get_extended_title_info(imdb_id)
+        if not raw_json:
+            logger.warning("No trivia found for title %s", imdb_id)
+            return []
+        trivia_list = parse_json_trivia(raw_json)
+        logger.debug("Fetched %d trivia items for title %s", len(trivia_list), imdb_id)
+        return trivia_list
 
     def get_reviews(self, imdb_id: str) -> List[Dict]:
         imdb_id, _ = self._normalize_imdb_id(imdb_id)
-        raw = self._get_extended_title_info(imdb_id)
-        return parse_json_reviews(raw) if raw else []
+        raw_json = self._get_extended_title_info(imdb_id)
+        if not raw_json:
+            logger.warning("No reviews found for title %s", imdb_id)
+            return []
+        reviews_list = parse_json_reviews(raw_json)
+        logger.debug("Fetched %d reviews for title %s", len(reviews_list), imdb_id)
+        return reviews_list
 
-    def get_parental_guide(self, imdb_id: str) -> Dict:
+    def get_filmography(self, imdb_id) -> dict:
+        """
+        Fetch full filmography for a person using the provided IMDb ID.
+        """
         imdb_id, _ = self._normalize_imdb_id(imdb_id)
-        raw = self._get_extended_title_info(imdb_id)
-        from .data_parsing import parse_json_parental_guide
-        return parse_json_parental_guide(raw) if raw else {}
+        raw_json = self._get_extended_name_info(imdb_id)
+        if not raw_json:
+            logger.warning("No full_credit found for name %s", imdb_id)
+            return {}
+        full_credits_list = parse_json_filmography(raw_json)
+        logger.debug("Fetched full_credits for name %s", imdb_id)
+        return full_credits_list
 
-    def get_filmography(self, imdb_id: str) -> dict:
-        imdb_id, _ = self._normalize_imdb_id(imdb_id)
-        raw = self._get_extended_name_info(imdb_id)
-        return parse_json_filmography(raw) if raw else {}
 
-
-# ---------------------------------------------------------------------------
-# Module-level default instance + backward-compatible free functions
-# ---------------------------------------------------------------------------
-
+# Create a default instance for backward compatibility and module-level functions
 _default_kit = IMDBKit()
+sync_session = _default_kit.session
 
 
 def normalize_imdb_id(imdb_id: str, locale: Optional[str] = None):
     return _default_kit._normalize_imdb_id(imdb_id, locale)
 
-def get_cookies(text: str, user_agent: Optional[str] = None) -> dict:
-    return _default_kit._get_cookies(text, user_agent)
+def get_cookies(text, user_agent=None):
+    return _default_kit._get_waf_token(text)
 
 def request_json_url(url: str) -> Any:
     return _default_kit._request_json_url(url)
@@ -447,7 +595,7 @@ def get_name(person_id: str, locale: Optional[str] = None) -> Optional[PersonDet
     return _default_kit.get_name(person_id, locale)
 
 def get_season_episodes(
-    imdb_id: str, season: int = 1, locale: Optional[str] = None
+    imdb_id: str, season=1, locale: Optional[str] = None
 ) -> SeasonEpisodesList:
     return _default_kit.get_season_episodes(imdb_id, season, locale)
 
@@ -455,7 +603,7 @@ def get_all_episodes(imdb_id: str, locale: Optional[str] = None):
     return _default_kit.get_all_episodes(imdb_id, locale)
 
 def get_episodes(
-    imdb_id: str, season: int = 1, locale: Optional[str] = None
+    imdb_id: str, season=1, locale: Optional[str] = None
 ) -> SeasonEpisodesList:
     return _default_kit.get_episodes(imdb_id, season, locale)
 
@@ -471,5 +619,5 @@ def get_trivia(imdb_id: str) -> List[Dict]:
 def get_reviews(imdb_id: str) -> List[Dict]:
     return _default_kit.get_reviews(imdb_id)
 
-def get_filmography(imdb_id: str) -> dict:
+def get_filmography(imdb_id) -> dict:
     return _default_kit.get_filmography(imdb_id)
