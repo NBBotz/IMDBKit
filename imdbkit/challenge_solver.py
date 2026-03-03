@@ -51,5 +51,5 @@ def solve_scrypt(challenge_input, checksum, difficulty):
 CHALLENGE_TYPES: dict[str, Optional[Callable[[Any, Any, Any], str]]] = {
     "h72f957df656e80ba55f5d8ce2e8c7ccb59687dba3bfb273d54b08a261b2f3002": solve_scrypt,
     "h7b0c470f0cfe3a80a9e26526ad185f484f6817d0832712a4a37a908786a6a67f": solve_pow_sha256,
-    "ha9faaffd31b4d5ede2a2e19d2d7fd525f66fee61911511960dcbb52d3c48ce25": None,  # mp_verify
+    "ha9faaffd31b4d5ede2a2e19d2d7fd525f66fee61911511960dcbb52d3c48ce25": None,
 }
