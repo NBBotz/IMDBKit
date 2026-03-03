@@ -1,7 +1,9 @@
 import random
 import json
+
 from .challenge_solver import CHALLENGE_TYPES
 from .device_profile import create_fingerprint
+
 
 class WafHandler:
     def __init__(
@@ -9,7 +11,7 @@ class WafHandler:
         goku_props: str,
         endpoint: str,
         domain: str,
-        session,                      
+        session,                          # caller's shared session — no new session created here
         user_agent: str = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -34,6 +36,8 @@ class WafHandler:
         self.user_agent = user_agent
         self.domain = domain
         self.endpoint = endpoint
+
+        # Pass existing token so AWS WAF can renew it instead of issuing a full new challenge
         existing = self.session.cookies.get("aws-waf-token")
         self.existing_token = existing if existing else None
 
@@ -105,9 +109,17 @@ class WafHandler:
             "accept-encoding": "gzip, deflate, br, zstd",
             "accept-language": "en-US,en;q=0.9",
         }
-        res = self.session.post(
+        import logging as _log
+        _logger = _log.getLogger(__name__)
+        response = self.session.post(
             f"https://{self.endpoint}/verify", json=payload
-        ).json()
+        )
+        _logger.debug("WAF /verify HTTP status: %s", response.status_code)
+        res = response.json()
+        _logger.debug("WAF /verify response keys: %s", list(res.keys()) if isinstance(res, dict) else type(res))
+        if "token" not in res:
+            raise ValueError(f"No token in WAF /verify response: {res}")
+        # Return only the token -- session cookies are already updated in-place
         return res["token"]
 
     def __call__(self):
