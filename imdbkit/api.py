@@ -8,7 +8,7 @@ import json
 from lxml import html
 from enum import Enum
 
-from curl_cffi import Session as SyncSession  
+from curl_cffi import Session as SyncSession  # single import — direct, explicit, no shim
 
 from .structs import (
     SearchResult,
@@ -49,6 +49,10 @@ USER_AGENTS_LIST = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
 ]
 
+# Global WAF state flag.
+# True  -> Chrome impersonation + WAF token on every request (safe mode)
+# False -> plain request, no overhead (fast mode, used after a clean run)
+# Automatically flips back to True if a 202/403 is encountered again.
 WAF_DETECTED = True
 
 
@@ -58,7 +62,13 @@ class IMDBKit:
         self.session = SyncSession(impersonate="chrome")
         self._reset_browse_headers()
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
     def _reset_browse_headers(self):
+        """Restore standard browser navigation headers on the shared session.
+        Called after WafHandler overwrites headers with its own CORS-style ones."""
         self.session.headers = {
             "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "accept-language": "en-US,en;q=0.5",
@@ -85,17 +95,32 @@ class IMDBKit:
         return imdb_id, lang
 
     def _solve_waf(self, html_text: str, user_agent: str) -> dict:
+        """
+        Solve the AWS WAF challenge using a FRESH dedicated session.
+        Isolated from self.session so no conflicting headers/cookies interfere.
+        Mirrors imdbinfo exactly:
+            session = cffi_requests.Session(impersonate="chrome")
+            token = AwsWaf(tk, host, "www.imdb.com", session)()
+        """
         try:
             tk, host = WafHandler.parse_challenge(html_text)
             solve_session = SyncSession(impersonate="chrome")
             token = WafHandler(
                 tk, host, "www.imdb.com", session=solve_session, user_agent=user_agent
             )()
-            self.session.cookies.set("aws-waf-token", token, domain=".imdb.com")
-            logger.debug("WAF token obtained: %s...", token[:20])
-            return {"aws-waf-token": token}
+            # Merge ALL cookies from solve session (not just the token)
+            # AWS WAF may set additional session-binding cookies during /inputs and /verify
+            all_cookies = dict(solve_session.cookies)
+            all_cookies["aws-waf-token"] = token
+            # Also store on main session for future requests
+            for name, value in all_cookies.items():
+                self.session.cookies.set(name, value, domain=".imdb.com")
+            logger.debug("WAF token obtained: %s... (total cookies: %d)", token[:20], len(all_cookies))
+            return all_cookies
         except Exception as e:
             logger.warning("WAF challenge solve failed: %s", e)
+            import traceback
+            logger.debug("WAF solve traceback: %s", traceback.format_exc())
             return {}
 
     def _safe_request(self, method: str, url: str, **kwargs) -> Any:
@@ -172,6 +197,10 @@ class IMDBKit:
         if "errors" in data:
             raise Exception(f"GraphQL error for {imdbId}: {data['errors']}")
         return data
+
+    # ------------------------------------------------------------------
+    # Extended info (GraphQL)
+    # ------------------------------------------------------------------
 
     @lru_cache(maxsize=128)
     def _get_extended_title_info(self, imdb_id: str) -> dict:
@@ -280,6 +309,10 @@ class IMDBKit:
         data = self._make_graphql_request(headers, nm_id, {"query": query}, url)
         return data.get("data", {}).get("name", {})
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     @lru_cache(maxsize=128)
     def get_movie(self, imdb_id: str, locale: Optional[str] = None) -> Optional[MovieDetail]:
         imdb_id, lang = self._normalize_imdb_id(imdb_id, locale)
@@ -382,6 +415,10 @@ class IMDBKit:
         raw = self._get_extended_name_info(imdb_id)
         return parse_json_filmography(raw) if raw else {}
 
+
+# ---------------------------------------------------------------------------
+# Module-level default instance + backward-compatible free functions
+# ---------------------------------------------------------------------------
 
 _default_kit = IMDBKit()
 
