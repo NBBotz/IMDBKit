@@ -84,12 +84,12 @@ class IMDBKit:
         imdb_id = f"{num:07d}"
         return imdb_id, lang
 
-    def _get_cookies(self, text: str, user_agent: Optional[str] = None) -> dict:
+    def _solve_waf(self, html_text: str, user_agent: str) -> dict:
         try:
-            tk, host = WafHandler.parse_challenge(text)
-            ua = user_agent or USER_AGENTS_LIST[0]
+            tk, host = WafHandler.parse_challenge(html_text)
+            solve_session = SyncSession(impersonate="chrome")
             token = WafHandler(
-                tk, host, "www.imdb.com", session=self.session, user_agent=ua
+                tk, host, "www.imdb.com", session=solve_session, user_agent=user_agent
             )()
             self.session.cookies.set("aws-waf-token", token, domain=".imdb.com")
             logger.debug("WAF token obtained: %s...", token[:20])
@@ -97,14 +97,14 @@ class IMDBKit:
         except Exception as e:
             logger.warning("WAF challenge solve failed: %s", e)
             return {}
-        finally:
-            self._reset_browse_headers()
 
     def _safe_request(self, method: str, url: str, **kwargs) -> Any:
         global WAF_DETECTED
+        from curl_cffi import requests as cffi_requests
         user_agent = random.choice(USER_AGENTS_LIST)
         self.session.headers["user-agent"] = user_agent
         logger.debug("Using User-Agent: %s", user_agent)
+
         if method.upper() == "GET":
             resp = self.session.get(url, **kwargs)
         else:
@@ -119,21 +119,32 @@ class IMDBKit:
         if waf_hit:
             WAF_DETECTED = True
             logger.warning(
-                "HTTP %s — WAF challenge detected. Solving from response body...",
+                "HTTP %s -- WAF challenge detected. Solving from response body...",
                 resp.status_code,
             )
-            cookies = self._get_cookies(resp.text, user_agent)
-            logger.info("WAF solved. Retrying with explicit cookie...")
-            retry_kwargs = dict(kwargs)
-            retry_kwargs["cookies"] = cookies
-            if method.upper() == "GET":
-                resp = self.session.get(url, **retry_kwargs)
-            else:
-                resp = self.session.post(url, **retry_kwargs)
+            cookies = self._solve_waf(resp.text, user_agent)
+            logger.info("WAF solved. Retrying as standalone request with explicit cookie...")
+            # Retry as a BARE standalone cffi request -- NOT self.session.get()
+            # Mirrors imdbinfo:
+            #   resp = cffi_requests.get(url, cookies={'aws-waf-token': token}, impersonate="chrome")
+            try:
+                if method.upper() == "GET":
+                    resp = cffi_requests.get(url, cookies=cookies, impersonate="chrome")
+                else:
+                    post_kwargs = {k: v for k, v in kwargs.items() if k != "cookies"}
+                    resp = cffi_requests.post(url, cookies=cookies, impersonate="chrome", **post_kwargs)
+            except Exception as e:
+                logger.warning("Standalone retry failed: %s -- falling back to session", e)
+                retry_kwargs = dict(kwargs)
+                retry_kwargs["cookies"] = cookies
+                if method.upper() == "GET":
+                    resp = self.session.get(url, **retry_kwargs)
+                else:
+                    resp = self.session.post(url, **retry_kwargs)
             retried = True
         else:
             if WAF_DETECTED:
-                logger.debug("Clean response received — disabling WAF overhead.")
+                logger.debug("Clean response -- disabling WAF overhead.")
             WAF_DETECTED = False
 
         if resp.status_code != 200:
@@ -142,7 +153,7 @@ class IMDBKit:
             if retried:
                 msg += " (after WAF retry)"
             if resp.text:
-                msg += f" — {resp.text[:200]}"
+                msg += f" -- {resp.text[:200]}"
             raise Exception(msg)
 
         return resp
@@ -268,7 +279,6 @@ class IMDBKit:
         headers = {"Content-Type": "application/json"}
         data = self._make_graphql_request(headers, nm_id, {"query": query}, url)
         return data.get("data", {}).get("name", {})
-
 
     @lru_cache(maxsize=128)
     def get_movie(self, imdb_id: str, locale: Optional[str] = None) -> Optional[MovieDetail]:
@@ -425,4 +435,4 @@ def get_reviews(imdb_id: str) -> List[Dict]:
     return _default_kit.get_reviews(imdb_id)
 
 def get_filmography(imdb_id: str) -> dict:
-    return _default_kit.get_filmography(imdb_id
+    return _default_kit.get_filmography(imdb_id)
