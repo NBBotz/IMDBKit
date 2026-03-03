@@ -8,7 +8,6 @@ import json
 from lxml import html
 from enum import Enum
 
-
 from .structs import (
     SearchResult,
     MovieDetail,
@@ -29,7 +28,8 @@ from .data_parsing import (
 )
 from .i18n import _retrieve_url_lang
 from .protection import WafHandler
-from curl_cffi import Session as SyncSession
+from curl_cffi import requests as cffi_requests  # imdbinfo jaisa — same import
+
 
 class TitleType(Enum):
     """
@@ -37,44 +37,44 @@ class TitleType(Enum):
     The values correspond to the URL parameter used in search queries.
     """
 
-    Movies = "ft"
-    Series = "tv"
+    Movies  = "ft"
+    Series  = "tv"
     Episodes = "ep"
-    Shorts = "sh"
+    Shorts  = "sh"
     TvMovie = "tvm"
-    Video = "v"
+    Video   = "v"
 
 
 TitleFilter = Union[TitleType, Tuple[TitleType, ...]]
 
 logger = logging.getLogger(__name__)
 
-# Rotated User Agents
 USER_AGENTS_LIST = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
 ]
 
+WAF_DETECTED = True
+
+
 class IMDBKit:
     def __init__(self, locale: Optional[str] = None):
         self.locale = locale
-        self.session = SyncSession(impersonate = "chrome")
-        # Default headers
+        self.session = cffi_requests.Session(impersonate="chrome")
         self.session.headers = {
-            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'accept-language': 'en-US,en;q=0.5',
-            'cache-control': 'no-cache',
-            'pragma': 'no-cache',
-            'priority': 'u=0, i',
-            'sec-ch-ua': '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"',
-            'sec-fetch-dest': 'document',
-            'sec-fetch-mode': 'navigate',
-            'sec-fetch-site': 'none',
-            'sec-fetch-user': '?1',
-            'sec-gpc': '1',
-            'upgrade-insecure-requests': '1',
-            # User-Agent will be rotated
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "accept-language": "en-US,en;q=0.5",
+            "cache-control": "no-cache",
+            "pragma": "no-cache",
+            "priority": "u=0, i",
+            "sec-ch-ua": '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "none",
+            "sec-fetch-user": "?1",
+            "sec-gpc": "1",
+            "upgrade-insecure-requests": "1",
         }
 
     def _normalize_imdb_id(self, imdb_id: str, locale: Optional[str] = None):
@@ -85,66 +85,69 @@ class IMDBKit:
         imdb_id = f"{num:07d}"
         return imdb_id, lang
 
-    def _get_cookies(self, text, user_agent=None):
+    def _get_waf_token(self, html_text: str) -> dict:
         try:
-          tk , host = WafHandler.parse_challenge(text)
-          if user_agent:
-            token, cookies = WafHandler(tk, host, "www.imdb.com", user_agent=user_agent)()
-          else:
-            token, cookies = WafHandler(tk, host, "www.imdb.com")()
-          self.session.cookies.update(cookies)
-          self.session.cookies.set("aws-waf-token", token, domain=".imdb.com")
-          return {"aws-waf-token": token}
-        except Exception:
-          return {}
+            tk, host = WafHandler.parse_challenge(html_text)
+            session = cffi_requests.Session(impersonate="chrome")
+            token = WafHandler(tk, host, "www.imdb.com", session)()
+            logger.debug("WAF token obtained: %s...", str(token)[:20])
+            return {"aws-waf-token": token}
+        except Exception as e:
+            logger.warning("WAF solve failed: %s", e)
+            return {}
 
-    def _safe_request(self, method: str, url: str, **kwargs) -> Any:
+    def _request_json_url(self, url: str) -> Any:
+        global WAF_DETECTED
         user_agent = random.choice(USER_AGENTS_LIST)
         self.session.headers["user-agent"] = user_agent
         logger.debug("Using User-Agent: %s", user_agent)
 
-        if method.upper() == "GET":
-            resp = self.session.get(url, **kwargs)
+        if WAF_DETECTED:
+            logger.debug("WAF_DETECTED=True")
+            resp = cffi_requests.get(url, cookies={}, impersonate="chrome")
         else:
-            resp = self.session.post(url, **kwargs)
+            resp = self.session.get(url)
 
-        # Check for 403, 202 or WAF challenge in 200
-        retried = False
-        if resp.status_code in [403, 202] or (resp.status_code == 200 and "window.gokuProps" in resp.text):
-            logger.info("Encountered potential WAF challenge (Status: %s). Attempting to solve...", resp.status_code)
-            cookies = self._get_cookies(resp.text, user_agent)
-            if cookies:
-                logger.info("WAF challenge solved. Retrying request...")
-                if method.upper() == "GET":
-                    resp = self.session.get(url, **kwargs)
-                else:
-                    resp = self.session.post(url, **kwargs)
-                retried = True
+        if resp.status_code == 202:
+            logger.warning("HTTP 202 received (WAF enforcement detected), solving WAF challenge...")
+            try:
+                session = cffi_requests.Session(impersonate="chrome")
+                tk, host = WafHandler.parse_challenge(resp.text)
+                token = WafHandler(tk, host, "www.imdb.com", session)()
+                WAF_DETECTED = True
+                logger.debug("WAF challenge solved, retrying with token")
+                resp = cffi_requests.get(url, cookies={"aws-waf-token": token}, impersonate="chrome")
+            except Exception as e:
+                logger.warning(
+                    "Failed to solve WAF challenge from 202 response: %s, "
+                    "falling back to Chrome impersonation without token (may not succeed)...", e
+                )
+                resp = cffi_requests.get(url, cookies={}, impersonate="chrome")
 
         if resp.status_code != 200:
-            logger.error("Request failed: %s %s", url, resp.status_code)
-            error_msg = f"Request failed for {url}: HTTP {resp.status_code} using User-Agent {user_agent}"
-            if retried:
-                 error_msg += " (after retry)"
+            logger.error("Error fetching %s: %s", url, resp.status_code)
+            error_msg = f"Error fetching {url}: HTTP {resp.status_code}"
             if resp.text:
                 error_msg += f" - {resp.text[:200]}"
+            if resp.status_code == 202:
+                error_msg += " AWS WAF Enforcement In Place. Try Again Later. ******"
             raise Exception(error_msg)
-
-        return resp
-
-    def _request_json_url(self, url: str) -> Any:
-        resp = self._safe_request("GET", url)
 
         tree = html.fromstring(resp.content or b"")
         script = tree.xpath('//script[@id="__NEXT_DATA__"]/text()')
         if not script or type(script) is not list:
             logger.error("No script found with id '__NEXT_DATA__'")
             raise Exception("No script found with id '__NEXT_DATA__'")
-        raw_json = json.loads(str(script[0]))
-        return raw_json
+        return json.loads(str(script[0]))
 
     def _make_graphql_request(self, headers, imdbId, payload, url) -> Any:
-        resp = self._safe_request("POST", url, headers=headers, json=payload)
+        resp = self.session.post(url, headers=headers, json=payload)
+        if resp.status_code != 200:
+            logger.error("GraphQL request failed: %s", resp.status_code)
+            error_msg = f"GraphQL request failed for {imdbId}: HTTP {resp.status_code}"
+            if resp.text:
+                error_msg += f" - {resp.text[:200]}"
+            raise Exception(error_msg)
         data = resp.json()
         if "errors" in data:
             logger.error("GraphQL error: %s", data["errors"])
@@ -402,21 +405,11 @@ class IMDBKit:
 
         logger.info("Searching for title '%s' [Type: %s]", title, type_log)
 
-        # search_title logic in original code returns None on failure instead of raising Exception
         try:
-            resp = self._safe_request("GET", url)
+            raw_json = self._request_json_url(url)
         except Exception as e:
             logger.warning("Search request failed: %s", e)
             return None
-
-        tree = html.fromstring(resp.content or b"")
-        script = tree.xpath('//script[@id="__NEXT_DATA__"]/text()')
-
-        if not script or not isinstance(script, list) or len(script) == 0:
-            logger.error("No script found with id '__NEXT_DATA__'")
-            raise Exception("No script found with id '__NEXT_DATA__'")
-
-        raw_json = json.loads(str(script[0]))
 
         result = parse_json_search(raw_json)
         logger.debug("Search for '%s' returned %s titles", title, len(result.titles))
@@ -486,17 +479,6 @@ class IMDBKit:
         return akas
 
     def get_all_interests(self, imdb_id: str):
-        """
-            Fetch all 'interests' for a title using the provided IMDb ID.
-
-        In the context of IMDb data, 'interests' are thematic tags, topics, or metadata associated with a title,
-        such as genres, themes, or other descriptors that go beyond the standard genre classification.
-        These interests are extracted from the extended title information returned by IMDb's GraphQL API.
-
-        Note: This function makes an additional request to IMDb's GraphQL endpoint, which may be slower and
-        more resource-intensive than standard API calls. Use this function only if you require interests
-        beyond what is available in movie.genres, as it can impact performance.
-        """
         imdb_id, _ = self._normalize_imdb_id(imdb_id)
         raw_json = self._get_extended_title_info(imdb_id)
         if not raw_json:
@@ -545,15 +527,16 @@ class IMDBKit:
         logger.debug("Fetched full_credits for name %s", imdb_id)
         return full_credits_list
 
-# Create a default instance for backward compatibility and module-level functions
+
 _default_kit = IMDBKit()
 sync_session = _default_kit.session
+
 
 def normalize_imdb_id(imdb_id: str, locale: Optional[str] = None):
     return _default_kit._normalize_imdb_id(imdb_id, locale)
 
 def get_cookies(text, user_agent=None):
-    return _default_kit._get_cookies(text, user_agent)
+    return _default_kit._get_waf_token(text)
 
 def request_json_url(url: str) -> Any:
     return _default_kit._request_json_url(url)
