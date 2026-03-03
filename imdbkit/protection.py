@@ -1,26 +1,16 @@
 import random
 import json
-
 from .challenge_solver import CHALLENGE_TYPES
 from .device_profile import create_fingerprint
 
 
 class WafHandler:
-    """
-    AWS WAF challenge solver.
-
-    imdbinfo jaisa design:
-    - Caller apna session pass karta hai
-    - WafHandler usi session se /inputs aur /verify call karta hai
-    - Sirf token return karta hai — session cookies caller ke paas rehti hai
-    """
-
     def __init__(
         self,
         goku_props: str,
         endpoint: str,
         domain: str,
-        session,                   # caller ka session — imdbinfo jaisa
+        session,                   
         user_agent: str = (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -46,13 +36,11 @@ class WafHandler:
         self.domain = domain
         self.endpoint = endpoint
 
-        # imdbinfo jaisa — existing token session se lo
         existing = self.session.cookies.get("aws-waf-token")
         self.existing_token = existing if existing else None
 
     @staticmethod
     def parse_challenge(html: str):
-        """imdbinfo ka AwsWaf.extract() ka exact equivalent"""
         goku_props = json.loads(
             html.split("window.gokuProps = ")[1].split(";")[0]
         )
@@ -68,11 +56,9 @@ class WafHandler:
         challenge_type = inputs["challenge_type"]
         solver = CHALLENGE_TYPES.get(challenge_type)
 
-        # mp_verify solve nahi hota — imdbinfo bhi isko skip karta hai
         if solver is None or not callable(solver):
             raise ValueError(
                 f"Unsolvable challenge type: '{challenge_type}'. "
-                "WAF caller ko fresh Chrome retry karni chahiye."
             )
 
         checksum, fp = create_fingerprint(self.user_agent)
@@ -131,7 +117,6 @@ class WafHandler:
         res = self.session.post(
             f"https://{self.endpoint}/verify", json=payload
         ).json()
-        # imdbinfo jaisa — sirf token return karo
         return res["token"]
 
     def __call__(self):
