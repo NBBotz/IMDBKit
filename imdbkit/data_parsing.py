@@ -561,6 +561,13 @@ def parse_json_movie(raw_json) -> Optional[MovieDetail]:
                 }
                 data["company_credits"][cat_id].append(CompanyInfo(**company_data))
 
+    data["writers"] = data["categories"].get("writer", [])
+    data["producers"] = data["categories"].get("producer", [])
+    data["composers"] = data["categories"].get("composer", [])
+    data["cinematographers"] = data["categories"].get("cinematographer", [])
+    data["music_team"] = data["categories"].get("music_department", [])
+    data["distributors"] = data["company_credits"].get("distributors", [])    
+
     # If Series/Episode kind
     # tvMovie,short,movie,tvEpisode,tvMiniseries,tvSpecial,tvShort,videoGame,video,musicVideo,podcastEpisode,podcastSeries
     if movie_kind in SERIES_IDENTIFIERS:
