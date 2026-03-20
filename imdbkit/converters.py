@@ -1,5 +1,25 @@
-import datetime
+# MIT License
+# Copyright (c) 2026 NBBotz (https://github.com/NBBotz)
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
 
+import datetime
 
 def _release_date(result: dict):
     """
@@ -20,21 +40,24 @@ def _dict_votes_(result):
         return []
     res = []
     for item in result:
-        imdbId = item[0]  # 'tt1234567'
-        rating = item[1]  # rating value, e.g. 8.5
-        votes = item[2]  # votes count, e.g. 123456
+        imdbId = item[0]
+        rating = item[1]
+        votes = item[2]
         res.append({"imdbId": imdbId, "rating": rating, "votes": votes})
     return res
 
 
 def _none_to_string_in_list(result):
     """
-    given a list of lists , if a None is found replace with '' recursively
+    given a list of lists, if a None is found replace with '' recursively
     """
-    return [
+    if result is None:
+        return []
+    r = [
         [str(item) if item is not None else "" for item in sublist]
         for sublist in result
     ]
+    return r
 
 
 def _join(result, separator=" "):
@@ -47,8 +70,6 @@ def _certificates_to_dict(result):
     """
     given a list of lists, convert it to a dict with country id as key and (country text, rating) as value
     """
-    # ['CA', 'Canada', '14', ['New Brunswick', 'Nova Scotia', 'Prince Edward Island']]
-    # ['CA', 'Canada', '16', ['Manitoba']]
     if result is None:
         return {}
     res = {}
@@ -56,9 +77,9 @@ def _certificates_to_dict(result):
         cert_id, country_code, country_name, rating_value, rating_reason, regions = item
         rating = f"{rating_value} " + ", ".join(regions)
         if country_code not in res:
-            res[country_code] = {"country": country_name, "rating": rating}
+            res[country_code] = [country_name, rating]
         else:
-            res[country_code]["rating"] += " :: " + rating
+            res[country_code][1] += " :: " + rating
     return res
 
 

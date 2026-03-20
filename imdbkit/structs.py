@@ -1,3 +1,24 @@
+# MIT License
+# Copyright (c) 2026 NBBotz (https://github.com/NBBotz)
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+
 from typing import Optional, List, Dict, Tuple, Union
 from pydantic import BaseModel, Field, field_validator
 import logging
@@ -62,15 +83,22 @@ class Person(BaseModel):
 
     @classmethod
     def from_search(cls, data: dict):
+        professions = data.get("professions", [])
+        prof = ",".join(
+            [
+                p.get("profession", {}).get("text", "")
+                for p in professions
+                if p.get("profession", {}).get("text")
+            ]
+        )
+
         return cls(
-            name=data["nameText"],
-            imdb_id=data["nameId"].replace("nm", ""),
-            id=data["nameId"].replace(
-                "nm", ""
-            ),  # id without 'nm' prefix, e.g. '0000126'
-            imdbId=data["nameId"],
-            url=f"https://www.imdb.com/name/{data['nameId']}",
-            job=str((data.get("professions") or [""])[0]),
+            name=data["nameText"]["text"],
+            imdb_id=data["id"].replace("nm", ""),
+            id=data["id"].replace("nm", ""),  # id without 'nm' prefix, e.g. '0000126'
+            imdbId=data["id"],
+            url=f"https://www.imdb.com/name/{data['id']}",
+            job=prof,
         )
 
     @classmethod
@@ -241,7 +269,7 @@ class MovieDetail(SeriesMixin, BaseModel):
     release_date: Optional[str] = None
     languages: List[str] = Field(default_factory=list)
     languages_text: List[str] = Field(default_factory=list)
-    certificates: Dict[str, Dict[str, str]] = Field(default_factory=dict)
+    certificates: Dict[str, Tuple[str, str]] = Field(default_factory=dict)
     mpaa: Optional[str] = None
     directors: List[Person] = Field(default_factory=list)
     stars: List[Person] = Field(default_factory=list)
@@ -276,13 +304,6 @@ class MovieDetail(SeriesMixin, BaseModel):
     production: List[str] = Field(default_factory=list)
     categories: Dict[str, List[Union[Person, CastMember]]] = Field(default_factory=dict)
     company_credits: Dict[str, List[CompanyInfo]] = Field(default_factory=dict)
-
-    writers: List[Person] = Field(default_factory=list)
-    producers: List[Person] = Field(default_factory=list)
-    composers: List[Person] = Field(default_factory=list)
-    cinematographers: List[Person] = Field(default_factory=list)
-    music_team: List[Person] = Field(default_factory=list)
-    distributors: List[CompanyInfo] = Field(default_factory=list)
 
     @field_validator(
         "languages",
@@ -333,17 +354,27 @@ class MovieBriefInfo(SeriesMixin, BaseModel):
 
     @classmethod
     def from_movie_search(cls, data: dict):
+        # safely extract nested structures (preserve original behavior of returning None when missing)
+        release = data.get("releaseDate")
+        year = release.get("year") if isinstance(release, dict) else None
+
+        primary = data.get("primaryImage")
+        cover_url = primary.get("url") if isinstance(primary, dict) else None
+
+        imdb_full = data["id"]
+        imdb_num = str(imdb_full.replace("tt", ""))
+
         return cls(
-            imdbId=data["titleId"],
-            imdb_id=str(data["titleId"].replace("tt", "")),
-            id=str(data["titleId"].replace("tt", "")),
-            title_localized=data["titleText"],
-            title=data["originalTitleText"],
-            cover_url=data.get("primaryImage", {}).get("url", None),
-            url=f"https://www.imdb.com/title/{data['titleId']}/",
-            year=data.get("releaseYear", None),
-            kind=data.get("titleType", {}).get("id", None),
-            rating=data.get("ratingSummary", {}).get("aggregateRating", None),
+            imdbId=imdb_full,
+            imdb_id=imdb_num,
+            id=imdb_num,
+            title_localized=data["titleText"]["text"],
+            title=data["originalTitleText"]["text"],
+            cover_url=cover_url,
+            url=f"https://www.imdb.com/title/{imdb_full}/",
+            year=year,
+            kind=data.get("titleType", {}).get("id"),
+            rating=data.get("ratingsSummary", {}).get("aggregateRating"),
         )
 
     @classmethod
@@ -586,3 +617,88 @@ class AkasData(BaseModel):
             return self.imdbId
         else:
             raise KeyError(f"Key {item} not found in AkasDataModel")
+
+
+class ParentalGuideContentDescription(BaseModel):
+    is_spoiler: bool = False
+    text: str = ""
+
+    @classmethod
+    def from_node(cls, node: dict) -> "ParentalGuideContentDescription":
+        return cls(
+            is_spoiler=node.get("isSpoiler", False),
+            text=node.get("text", {}).get("plaidHtml", ""),
+        )
+
+
+class ParentalGuideCategory(BaseModel):
+    id: str = ""
+    text: str = ""
+    content_descriptions: List[ParentalGuideContentDescription] = Field(
+        default_factory=list
+    )
+    severity: str = "NONE"
+
+    @classmethod
+    def from_edge(cls, edge: dict) -> "ParentalGuideCategory":
+        cat = edge.get("category", {}) or {}
+        cat_contents = [
+            ParentalGuideContentDescription.from_node(item.get("node", {}) or {})
+            for item in edge.get("guideItems", {}).get("edges", []) or []
+        ]
+        votesfor = 0
+        severity = "NONE"
+        for tm in edge.get("severityBreakdown", []):
+            if tm.get("votedFor", 0) > votesfor:
+                votesfor = tm.get("votedFor", 0)
+                severity = tm.get("voteType", "NONE")
+
+        return cls(
+            id=cat.get("id", ""),
+            text=cat.get("text", ""),
+            content_descriptions=cat_contents,
+            severity=severity,
+        )
+
+    def has_category_texts(self) -> bool:
+        """Return True if there are any guide items in this category."""
+        return len(self.content_descriptions) > 0
+
+    def category_texts_list(self, spoiler=False) -> List[str]:
+        """Return a list of texts from the guide items."""
+        return [
+            item.text
+            for item in self.content_descriptions
+            if item.is_spoiler == spoiler
+        ]
+
+    def __repr__(self):
+        return f"{self.id} - {self.severity} ({len(self.content_descriptions)} descriptions)"
+
+    def __str__(self):
+        return self.__repr__()
+
+
+class ParentalGuideList(BaseModel):
+    categories: List[ParentalGuideCategory] = Field(default_factory=list)
+
+    @classmethod
+    def from_raw(cls, parental_guide: dict) -> Optional["ParentalGuideList"]:
+        if not parental_guide:
+            return None
+        categories = [
+            ParentalGuideCategory.from_edge(edge)
+            for edge in parental_guide.get("categories", []) or []
+        ]
+        return cls(categories=categories)
+
+    @property
+    def summary(self) -> dict[str, str]:
+        """Return the list of parental guide categories."""
+        return {category.id: category.severity for category in self.categories}
+
+    def __str__(self):
+        return f"{self.summary}"
+
+    def __repr__(self):
+        return self.__str__()

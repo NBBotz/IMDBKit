@@ -1,3 +1,24 @@
+# MIT License
+# Copyright (c) 2026 NBBotz (https://github.com/NBBotz)
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+
 from typing import Optional, List, Dict, Union, Any
 import logging
 
@@ -23,6 +44,7 @@ from .structs import (
     CompanyInfo,
     AkasData,
     AwardInfo,
+    ParentalGuideList,
 )
 from .converters import (
     _release_date,
@@ -86,13 +108,20 @@ newCreditCategoryIdToOldCategoryIdObject = {
     "amzn1.imdb.concept.name_credit_category.8c952a79-f27c-4e5a-be85-b114b0ecd04e": "transportation_department",
     "amzn1.imdb.concept.name_credit_category.fcb0b804-e618-4044-8a74-79e94d17e3cd": "visual_effects",
     "amzn1.imdb.concept.name_credit_category.c84ecaff-add5-4f2e-81db-102a41881fe3": "writer",
+    # group categories
+    "amzn1.imdb.concept.name_credit_group.7510356e-fde9-438e-b3ad-0099ba6bc8ce": "stars",
 }
+
 
 def flip_unique(d: Dict[Any, Any]) -> Dict[Any, Any]:
     """Flip a dict when values are unique: value -> key."""
     return {v: k for k, v in d.items()}
 
-OldCategoryIdToNewCategoryIdObject = flip_unique(newCreditCategoryIdToOldCategoryIdObject)
+
+OldCategoryIdToNewCategoryIdObject = flip_unique(
+    newCreditCategoryIdToOldCategoryIdObject
+)
+
 
 def pjmespatch(query, data, post_process=None, *args, **kwargs):
     result = jmespath.search(query, data)
@@ -103,13 +132,27 @@ def pjmespatch(query, data, post_process=None, *args, **kwargs):
 
 
 def _parse_directors(result):
+    if not result:
+        return []
     return [
         Person.from_directors(edge)
         for group in result
-        if group.get("grouping", {}).get("groupingId") in [ OldCategoryIdToNewCategoryIdObject["director"] ]
+        if group.get("grouping", {}).get("groupingId")
+        in [OldCategoryIdToNewCategoryIdObject["director"]]
         for edge in group.get("credits", {}).get("edges", [])
     ]
 
+
+def _parse_directors_crewv2(result):
+    if not result:
+        return []
+    return [
+        Person.from_directors(edge)
+        for group in result
+        if group.get("grouping", {}).get("groupingId")
+        in [OldCategoryIdToNewCategoryIdObject["director"]]
+        for edge in group.get("credits", [])
+    ]
 
 
 def _parse_creators(result):
@@ -123,7 +166,6 @@ def _parse_creators(result):
 
 
 def _parse_credits(result) -> dict:
-    """feed credits from the page 'name' to the PersonDetail model"""
 
     if result is None:
         return {}
@@ -210,15 +252,17 @@ def _parse_jobs_v2(raw_jobs) -> List[str]:
         jobs.append(job_name)
     return jobs
 
+
 def _parse_principal_credits_v2_stars(principal_credits_groups) -> List[Person]:
     if not principal_credits_groups:
         return []
-    stars: List[Person] = []
-    for group in principal_credits_groups:
-        if group.get("grouping", {}).get("text") == "Stars":
-            for credit in group.get("credits", []):
-                stars.append(Person.from_cast(credit))
-    return stars
+    return [
+        Person.from_cast(edge)
+        for group in principal_credits_groups
+        if group.get("grouping", {}).get("groupingId")
+        in [OldCategoryIdToNewCategoryIdObject["stars"]]
+        for edge in (group.get("credits") or [])
+    ]
 
 
 def _parse_awards(awards_node) -> AwardInfo:
@@ -319,12 +363,16 @@ def parse_json_movie(raw_json) -> Optional[MovieDetail]:
     data["trailers"] = pjmespatch(
         "props.pageProps.mainColumnData.primaryVideos.edges[].node.id",
         raw_json,
-        lambda x: [f"{VIDEO_URL}{id}" for id in x if id],
+        lambda x: [f"{VIDEO_URL}{i}" for i in (x or []) if i],
     )
-    data["interests"] = pjmespatch(
-        "props.pageProps.mainColumnData.interests.edges[].node.primaryText.text",
-        raw_json,
+    data["interests"] = (
+        pjmespatch(
+            "props.pageProps.mainColumnData.interests.edges[].node.primaryText.text",
+            raw_json,
+        )
+        or []
     )
+
     data["certificates"] = pjmespatch(
         "props.pageProps.mainColumnData.certificates.edges[].node.[id,country.id,country.text,rating,ratingReason,attributes[].text]",
         raw_json,
@@ -336,14 +384,24 @@ def parse_json_movie(raw_json) -> Optional[MovieDetail]:
         raw_json,
         _parse_mpaa,
     )
-    data["stars"] =pjmespatch(         "props.pageProps.mainColumnData.principalCreditsV2", raw_json,
-                                       _parse_principal_credits_v2_stars,
-                                       )
-    data["directors"] = pjmespatch(
-        "props.pageProps.mainColumnData.creditGroupings.edges[].node",
+    data["stars"] = pjmespatch(
+        "props.pageProps.mainColumnData.principalCreditsV2",
         raw_json,
-        _parse_directors,
+        _parse_principal_credits_v2_stars,
     )
+    data["directors"] = pjmespatch(
+        "props.pageProps.mainColumnData.crewV2",
+        raw_json,
+        _parse_directors_crewv2,
+    )
+
+    if not data["directors"]:  # fallback to old parsing if new one fails
+        data["directors"] = pjmespatch(
+            "props.pageProps.mainColumnData.creditGroupings.edges[].node",
+            raw_json,
+            _parse_directors,
+        )
+
     data["filming_locations"] = pjmespatch(
         "props.pageProps.mainColumnData.filmingLocations.edges[].node.text", raw_json
     )
@@ -353,48 +411,79 @@ def parse_json_movie(raw_json) -> Optional[MovieDetail]:
     data["countries"] = pjmespatch(
         "props.pageProps.mainColumnData.countriesDetails.countries[].text", raw_json
     )
-    data["storyline_keywords"] = pjmespatch(
-        "props.pageProps.mainColumnData.storylineKeywords.edges[].node.text", raw_json
+    data["storyline_keywords"] = (
+        pjmespatch(
+            "props.pageProps.mainColumnData.storylineKeywords.edges[].node.text",
+            raw_json,
+        )
+        or []
     )
     data["production"] = pjmespatch(
         "props.pageProps.mainColumnData.production.edges[].node.company.companyText.text",
         raw_json,
     )
-    data["summaries"] = pjmespatch(
-        "props.pageProps.mainColumnData.summaries.edges[].node.plotText.plaidHtml",
-        raw_json,
+    data["summaries"] = (
+        pjmespatch(
+            "props.pageProps.mainColumnData.summaries.edges[].node.plotText.plaidHtml",
+            raw_json,
+        )
+        or []
     )
-    data["synopses"] = pjmespatch(
-        "props.pageProps.mainColumnData.synopses.edges[].node.plotText.plaidHtml",
-        raw_json,
+    data["synopses"] = (
+        pjmespatch(
+            "props.pageProps.mainColumnData.synopses.edges[].node.plotText.plaidHtml",
+            raw_json,
+        )
+        or []
     )
-    data["sound_mixes"] = pjmespatch(
-        "props.pageProps.mainColumnData.technicalSpecifications.soundMixes.items[].text",
-        raw_json,
+    data["sound_mixes"] = (
+        pjmespatch(
+            "props.pageProps.mainColumnData.technicalSpecifications.soundMixes.items[].text",
+            raw_json,
+        )
+        or []
     )
-    data["processes"] = pjmespatch(
-        "props.pageProps.mainColumnData.technicalSpecifications.processes.items[].process",
-        raw_json,
+    data["processes"] = (
+        pjmespatch(
+            "props.pageProps.mainColumnData.technicalSpecifications.processes.items[].process",
+            raw_json,
+        )
+        or []
     )
-    data["printed_formats"] = pjmespatch(
-        "props.pageProps.mainColumnData.technicalSpecifications.printedFormats.items[].printedFormat",
-        raw_json,
+    data["printed_formats"] = (
+        pjmespatch(
+            "props.pageProps.mainColumnData.technicalSpecifications.printedFormats.items[].printedFormat",
+            raw_json,
+        )
+        or []
     )
-    data["negative_formats"] = pjmespatch(
-        "props.pageProps.mainColumnData.technicalSpecifications.negativeFormats.items[].negativeFormat",
-        raw_json,
+    data["negative_formats"] = (
+        pjmespatch(
+            "props.pageProps.mainColumnData.technicalSpecifications.negativeFormats.items[].negativeFormat",
+            raw_json,
+        )
+        or []
     )
-    data["laboratories"] = pjmespatch(
-        "props.pageProps.mainColumnData.technicalSpecifications.laboratories.items[].laboratory",
-        raw_json,
+    data["laboratories"] = (
+        pjmespatch(
+            "props.pageProps.mainColumnData.technicalSpecifications.laboratories.items[].laboratory",
+            raw_json,
+        )
+        or []
     )
-    data["colorations"] = pjmespatch(
-        "props.pageProps.mainColumnData.technicalSpecifications.colorations.items[].text",
-        raw_json,
+    data["colorations"] = (
+        pjmespatch(
+            "props.pageProps.mainColumnData.technicalSpecifications.colorations.items[].text",
+            raw_json,
+        )
+        or []
     )
-    data["cameras"] = pjmespatch(
-        "props.pageProps.mainColumnData.technicalSpecifications.cameras.items[].camera",
-        raw_json,
+    data["cameras"] = (
+        pjmespatch(
+            "props.pageProps.mainColumnData.technicalSpecifications.cameras.items[].camera",
+            raw_json,
+        )
+        or []
     )
     data["aspect_ratios"] = pjmespatch(
         "props.pageProps.mainColumnData.technicalSpecifications.aspectRatios.items[].[aspectRatio,attributes[0].text]",
@@ -441,36 +530,36 @@ def parse_json_movie(raw_json) -> Optional[MovieDetail]:
 
     # company_credits [ distributors , production_companies, special_effects_companies, etc ]
     data["company_credits"] = {}
-    for company_credits_category in pjmespatch(
-        "props.pageProps.mainColumnData.companyCreditCategories[]", raw_json
-    ):
-        cat_id = company_credits_category.get("category").get("id")
-        if not cat_id:  # sometimes there is no id, skip those
-            continue
-        data["company_credits"].setdefault(cat_id, [])
-        for company in company_credits_category["companyCredits"]["edges"]:
-            company_node = company.get("node", {})
-            company_data = {
-                "id": company_node.get("company", {}).get("id", "").replace("co", ""),
-                "imdb_id": company_node.get("company", {})
-                .get("id", "")
-                .replace("co", ""),
-                "imdbId": company_node.get("company", {}).get("id", ""),
-                "name": company_node.get("displayableProperty", {})
-                .get("value", {})
-                .get("plainText", ""),
-                "url": f"{COMPANY_URL}{company_node.get('company', {}).get('id', '')}/",
-                "attributes": pjmespatch("[].text", company_node.get("attributes")),
-                "countries": pjmespatch("[].text", company_node.get("countries")),
-            }
-            data["company_credits"][cat_id].append(CompanyInfo(**company_data))
 
-    data["writers"] = data["categories"].get("writer", [])
-    data["producers"] = data["categories"].get("producer", [])
-    data["composers"] = data["categories"].get("composer", [])
-    data["cinematographers"] = data["categories"].get("cinematographer", [])
-    data["music_team"] = data["categories"].get("music_department", [])
-    data["distributors"] = data["company_credits"].get("distributors", [])
+    company_credit_categories = pjmespatch(
+        "props.pageProps.mainColumnData.companyCreditCategories[]", raw_json
+    )
+    if company_credit_categories:
+        for company_credits_category in pjmespatch(
+            "props.pageProps.mainColumnData.companyCreditCategories[]", raw_json
+        ):
+            cat_id = company_credits_category.get("category").get("id")
+            if not cat_id:  # sometimes there is no id, skip those
+                continue
+            data["company_credits"].setdefault(cat_id, [])
+            for company in company_credits_category["companyCredits"]["edges"]:
+                company_node = company.get("node", {})
+                company_data = {
+                    "id": company_node.get("company", {})
+                    .get("id", "")
+                    .replace("co", ""),
+                    "imdb_id": company_node.get("company", {})
+                    .get("id", "")
+                    .replace("co", ""),
+                    "imdbId": company_node.get("company", {}).get("id", ""),
+                    "name": company_node.get("displayableProperty", {})
+                    .get("value", {})
+                    .get("plainText", ""),
+                    "url": f"{COMPANY_URL}{company_node.get('company', {}).get('id', '')}/",
+                    "attributes": pjmespatch("[].text", company_node.get("attributes")),
+                    "countries": pjmespatch("[].text", company_node.get("countries")),
+                }
+                data["company_credits"][cat_id].append(CompanyInfo(**company_data))
 
     # If Series/Episode kind
     # tvMovie,short,movie,tvEpisode,tvMiniseries,tvSpecial,tvShort,videoGame,video,musicVideo,podcastEpisode,podcastSeries
@@ -526,17 +615,20 @@ def parse_json_movie(raw_json) -> Optional[MovieDetail]:
 
 
 def parse_json_search(raw_json) -> SearchResult:
-    logger.debug("Parsing search results JSON")
+    data = pjmespatch("data.mainSearch.edges[].node.entity", raw_json)
     title = []
-    for title_data in pjmespatch(
-        "props.pageProps.titleResults.results[].listItem", raw_json
-    ):
-        title.append(MovieBriefInfo.from_movie_search(title_data))
     people = []
-    for person_data in pjmespatch(
-        "props.pageProps.nameResults.results[].listItem", raw_json
-    ):
-        people.append(Person.from_search(person_data))
+
+    [
+        people.append(Person.from_search(e))
+        for e in data
+        if e.get("__typename") == "Name"
+    ]
+    [
+        title.append(MovieBriefInfo.from_movie_search(e))
+        for e in data
+        if e.get("__typename") == "Title"
+    ]
 
     res = SearchResult(titles=title, names=people)
     logger.info("Parsed search results: %s titles, %s names", len(title), len(people))
@@ -763,3 +855,8 @@ def parse_json_filmography(raw_json) -> Dict[str, List[MovieBriefInfo]]:
             MovieBriefInfo.from_filmography(pjmespatch("title", edge))
         )
     return credits_by_job
+
+
+def parse_json_parental_guide(raw_json):
+    """Return ParentalGuideData or None."""
+    return ParentalGuideList.from_raw(raw_json.get("parentsGuide"))
