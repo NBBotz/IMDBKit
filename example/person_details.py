@@ -1,0 +1,58 @@
+from imdbkit import IMDBKit
+
+import logging
+
+logging.basicConfig(level=logging.WARNING)
+
+kit = IMDBKit()
+
+# Example 1: Search for a person by name
+person_results = kit.search_movie("Mary")
+for p in person_results.names:
+    print(f"{p.name} - {p.job} ({p.id})")
+    person = kit.get_name(p.id)
+    if person:
+        print(f"Known For: {', '.join(person.knownfor)}")
+        print(f"Image URL: {person.image_url}")
+        print(f"IMDb URL: {person.url}")
+        print(f"Name: {person.name}")
+        print(f"Known For: {', '.join(person.knownfor)}")
+        print(f"Birth Date: {person.birth_date}")
+        print(f"Birth Place: {person.birth_place}")
+        print(f"Death Date: {person.death_date}")
+        print(f"Death Place: {person.death_place}")
+        print(f"Death Reason: {person.death_reason}")
+        print(f"Bio: {person.bio[:100]}...")  # Print first 100 characters of bio
+        print(f"Height: {person.height}")
+        print(f"Primary Profession: {', '.join(person.primary_profession)}")
+        print(f"Image URL: {person.image_url}")
+        print(f"IMDb URL: {person.url}")
+
+movie = kit.get_movie("0133093")
+for p in movie.categories['cast']:
+    print(f"{p.name} - {p.job} ({p.id})")
+    person = kit.get_name(p.id)
+    if person:
+        print(f"Known For: {', '.join(person.knownfor)}")
+        print(f"Image URL: {person.image_url}")
+        print(f"IMDb URL: {person.url}")
+        print(f"Name: {person.name}")
+        print(f"Known For: {', '.join(person.knownfor)}")
+        print(f"Birth Date: {person.birth_date}")
+        print(f"Birth Place: {person.birth_place}")
+        print(f"Death Date: {person.death_date}")
+        print(f"Death Place: {person.death_place}")
+        print(f"Death Reason: {person.death_reason}")
+        print(f"Bio: {person.bio[:100]}...")  # Print first 100 characters of bio
+        print(f"Height: {person.height}")
+        print(f"Primary Profession: {', '.join(person.primary_profession)}")
+        print(f"Image URL: {person.image_url}")
+        print(f"IMDb URL: {person.url}")
+
+        # filmography
+        filmography_results = kit.get_filmography(person.id)
+        if filmography_results:
+            for role, films in filmography_results.items():
+                print(f"\nRole: {role}")
+                for film in films:
+                    print(f" - {film.title} ({film.year}) [{film.imdbId}]")
