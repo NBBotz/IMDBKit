@@ -1,0 +1,7 @@
+include README.md
+include DISCLAIMER
+include pyproject.toml
+graft docs
+graft examples
+graft tests
+global-exclude *.py[cod]
