@@ -29,6 +29,7 @@ import json
 from lxml import html
 from enum import Enum
 
+
 from .structs import (
     SearchResult,
     MovieDetail,
@@ -156,7 +157,8 @@ class IMDBKit:
     # ── GraphQL request (no WAF — uses plain niquests) ─────────────────────────
 
     def _make_graphql_request(self, headers, search_term, payload, url) -> Any:
-        resp = niquests.post(url, headers=headers, json=payload)
+        resp = cffi_requests.post(url, headers=headers, json=payload, impersonate="chrome")
+        # resp = niquests.post(url, headers=headers, json=payload)
         if resp.status_code != 200:
             logger.error("GraphQL request failed: %s", resp.status_code)
             error_msg = f"GraphQL request failed for {search_term}: HTTP {resp.status_code}"
@@ -266,6 +268,9 @@ class IMDBKit:
         headers = {
             "Content-Type": "application/json",
             "x-imdb-user-country": country_code,
+            "User-Agent": random.choice(USER_AGENTS_LIST),
+            "Referer": "https://www.imdb.com/",
+            "Origin": "https://www.imdb.com",
         }
 
         logger.info("Searching for title '%s' [Type: %s] via GraphQL", title, type_log)
